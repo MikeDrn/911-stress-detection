@@ -6,6 +6,9 @@
                               windows but *no* alert
                               (shows the consecutive-window rule suppressing blips)
 * call_04_contract_violation_44k_stereo.wav  44.1 kHz stereo -> HTTP 422 data contract
+* call_05_phone_line_calm.wav  calm caller on a noisy mobile line (the data shift):
+                              the clean-trained v1 raises a FALSE alarm, the retrained
+                              v2 does not -> before/after screenshot for Course 4/7
 
     uv run python -m scripts.make_demo_calls
 """
@@ -55,6 +58,12 @@ def main() -> int:
     t = np.arange(int(4 * 44100)) / 44100
     stereo = np.stack([0.3 * np.sin(2 * np.pi * 220 * t)] * 2, axis=1).astype(np.float32)
     sf.write(out / "call_04_contract_violation_44k_stereo.wav", stereo, 44100)
+
+    # independent generator so the four calls above stay byte-identical
+    phone = synth_utterance(
+        14.0, False, np.random.default_rng(3036), SR, female=True, channel="phone"
+    )
+    sf.write(out / "call_05_phone_line_calm.wav", phone, SR, subtype="PCM_16")
 
     for p in sorted(out.glob("*.wav")):
         print(f"[demo] {p.relative_to(PROJECT_ROOT)}")

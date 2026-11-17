@@ -54,7 +54,7 @@ CMD ["uvicorn", "src.serve:app", "--host", "0.0.0.0", "--port", "8000", "--worke
 FROM base AS ui
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --no-dev --no-install-project --extra ui
-COPY src/ui.py ./src/ui.py
+COPY src/ui.py src/bandits.py ./src/
 RUN mkdir -p /app/data/demo
 USER app
 EXPOSE 8501

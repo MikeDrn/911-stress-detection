@@ -1,3 +1,14 @@
+# CI/CD for the 911 voice-stress system (Course 7).
+#
+#   CI  (every push / PR): lint -> data contracts -> unit+API tests (FakeModel)
+#                          -> pipeline smoke test (1 epoch) -> build images + container smoke test
+#   CD  (main only):       push the SAME tested images, tagged with the commit SHA,
+#                          -> "release" job pauses for a human approval (environment: production)
+#
+# The model has its own release train (Course 7 slide 21): continuous training runs
+# `dvc repro` where the data and MLflow live (the laptop), and promotion is moving the
+# @champion alias after human approval - no image rebuild needed.
+
 name: CI
 
 on:
@@ -9,6 +20,10 @@ on:
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
+
+# Least privilege by default (slide 17); jobs that need more ask for it explicitly.
+permissions:
+  contents: read
 
 env:
   PYTHONUNBUFFERED: "1"
@@ -36,10 +51,12 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.11"
-      - name: Generate small synthetic dataset
-        run: >
-          uv run --no-project --with numpy --with scipy --with soundfile --with pyyaml --with pydantic
-          python -m scripts.generate_synthetic_data --clips-per-class 12
+      - name: Generate small synthetic dataset (clean + phone-line calls)
+        run: |
+          uv run --no-project --with numpy --with scipy --with soundfile --with pyyaml --with pydantic \
+            python -m scripts.generate_synthetic_data --clips-per-class 12
+          uv run --no-project --with numpy --with scipy --with soundfile --with pyyaml --with pydantic \
+            python -m scripts.generate_synthetic_data --clips-per-class 6 --channel phone
       - name: Build split manifest
         run: >
           uv run --no-project --with numpy --with soundfile --with pyyaml --with pydantic
@@ -65,9 +82,9 @@ jobs:
         with:
           python-version: "3.11"
           enable-cache: true
-          cache-dependency-glob: pyproject.toml
-      - name: Install (CPU-only torch from the PyTorch index)
-        run: uv sync --extra ml --extra api
+          cache-dependency-glob: uv.lock
+      - name: Install exactly the versions in uv.lock (fails if the lock is stale)
+        run: uv sync --locked --extra ml --extra api
       - name: Run fast test suite
         run: uv run pytest -m "not slow" --junitxml=reports/junit.xml
       - uses: actions/upload-artifact@v4
@@ -76,7 +93,8 @@ jobs:
           name: junit
           path: reports/junit.xml
 
-  # 4. Model smoke test: the whole DVC pipeline offline with a 1-epoch model.
+  # 4. Model smoke test: the whole DVC pipeline offline with a 1-epoch model
+  #    ("CI checks that training works, not that it is good" - slide 18).
   model-smoke:
     name: Pipeline smoke test
     needs: test
@@ -87,38 +105,89 @@ jobs:
         with:
           python-version: "3.11"
           enable-cache: true
-          cache-dependency-glob: pyproject.toml
-      - run: uv sync --extra ml --extra api --extra tracking
+          cache-dependency-glob: uv.lock
+      - run: uv sync --locked --extra ml --extra api --extra tracking
       - run: uv run pytest -m slow
 
-  # 5. Only tested code becomes images: build all three targets and boot the
-  #    stack with the FakeModel to prove probes + networking work end to end.
-  docker:
-    name: Build images + container smoke test
+  # 5. Build once (slide 20): build the three images ONE time, tag them with the commit
+  #    SHA, boot them with the FakeModel and probe them. On main, push those exact images.
+  images:
+    name: Build, smoke-test and push images
     needs: [test, data-contracts, model-smoke]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write  # only this job may write to the container registry
     steps:
       - uses: actions/checkout@v4
+      - name: Image names (GHCR requires lowercase)
+        run: |
+          echo "IMAGE_REGISTRY=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=${GITHUB_SHA}" >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@v3
-      - name: Build images
+      - name: Build images (tag = commit SHA, never :latest)
         run: docker compose build
-      - name: Boot stack (FakeModel) and wait for healthchecks
+      - name: Boot the stack with FakeModels and wait for healthchecks
         env:
           MODEL_SOURCE: fake
+          FAKE_CHALLENGER_SCORES: "0.1,0.2"
           MODEL_LOAD_DELAY_SECONDS: "3"
         run: |
           mkdir -p models data/demo
-          docker compose up -d --wait --wait-timeout 180
+          docker compose up -d --no-build --wait --wait-timeout 180
           docker compose ps
-      - name: Probe endpoints across 911-net
+      - name: Smoke test across 911-net
         run: |
           curl -fsS http://127.0.0.1:8000/health
           curl -fsS http://127.0.0.1:8501/_stcore/health
           curl -fsS http://127.0.0.1:5000/health
+          curl -fsS -X POST http://127.0.0.1:8000/rollout -H 'Content-Type: application/json' -d '{"mode":"shadow"}'
           docker compose exec -T dispatcher-ui python -c "import urllib.request; print(urllib.request.urlopen('http://stress-api:8000/health').read())"
       - name: Logs on failure
         if: failure()
         run: docker compose logs --no-color
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push the exact images that were just tested
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker compose push
+          {
+            echo "### Images pushed (tag = commit SHA)"
+            for s in stress-api dispatcher-ui mlflow-server; do
+              echo "- \`${IMAGE_REGISTRY}/${s}:${IMAGE_TAG}\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Tear down
         if: always()
         run: docker compose down -v
+
+  # 6. Continuous DELIVERY (slide 6): everything is automated up to production, but a human
+  #    presses the last button. The 'production' environment has a required reviewer, so this
+  #    job waits for approval in the Actions UI. Approving it publishes the release notes with
+  #    the exact deployment commands for this commit.
+  release:
+    name: Release to production (human approval)
+    needs: images
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Deployment instructions for this exact commit
+        run: |
+          REG="ghcr.io/${GITHUB_REPOSITORY,,}"
+          {
+            echo "## Approved release \`${GITHUB_SHA::7}\`"
+            echo "Approved by **${GITHUB_ACTOR}**. Deploy the exact tested images on the host:"
+            echo '```powershell'
+            echo "\$env:IMAGE_REGISTRY=\"${REG}\"; \$env:IMAGE_TAG=\"${GITHUB_SHA}\""
+            echo "docker compose pull"
+            echo "docker compose up -d --no-build"
+            echo '```'
+            echo "Rollback = redeploy the previous approved SHA (images are immutable)."
+          } >> "$GITHUB_STEP_SUMMARY"

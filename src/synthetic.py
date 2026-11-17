@@ -20,7 +20,7 @@ any real experiment.
 from __future__ import annotations
 
 import numpy as np
-from scipy.signal import lfilter
+from scipy.signal import butter, lfilter, sosfilt
 
 VOWEL_FORMANTS = {  # (F1, F2, F3) in Hz, rough averages
     "a": (730, 1090, 2440),
@@ -47,17 +47,39 @@ def _resonator(x: np.ndarray, freq: float, bw: float, sr: int) -> np.ndarray:
     return lfilter(b, a, x)
 
 
+CHANNELS = ("clean", "phone")
+
+
+def _phone_channel(speech: np.ndarray, rng: np.random.Generator, sr: int) -> np.ndarray:
+    """Narrow-band telephone line: 300-3400 Hz band-pass + soft-clipping codec."""
+    sos = butter(4, [300, 3400], btype="bandpass", fs=sr, output="sos")
+    y = sosfilt(sos, speech)
+    drive = rng.uniform(2.0, 4.0)
+    return np.tanh(drive * y / (np.abs(y).max() + 1e-9)) / np.tanh(drive)
+
+
 def synth_utterance(
     duration_s: float,
     stressed: bool,
     rng: np.random.Generator,
     sr: int = 16000,
+    female: bool | None = None,
+    channel: str = "clean",
 ) -> np.ndarray:
+    """One synthetic utterance.
+
+    ``female`` forces the speaker sex (used by slice tests); ``channel="phone"``
+    simulates a narrow-band, noisy telephone line (the data-shift scenario).
+    The default arguments reproduce the original dataset byte for byte.
+    """
+    if channel not in CHANNELS:
+        raise ValueError(f"channel must be one of {CHANNELS}")
     n = int(duration_s * sr)
     t = np.arange(n) / sr
 
     # --- speaker + state dependent prosody -------------------------------
-    female = rng.random() < 0.5
+    drawn_female = rng.random() < 0.5
+    female = drawn_female if female is None else female
     f0_base = rng.uniform(165, 235) if female else rng.uniform(90, 145)
     if stressed:
         f0_base *= rng.uniform(1.18, 1.45)
@@ -104,6 +126,9 @@ def synth_utterance(
 
     # --- channel: background noise at a random SNR ------------------------
     snr_db = rng.uniform(12, 30)
+    if channel == "phone":
+        speech = _phone_channel(speech, rng, sr)
+        snr_db = rng.uniform(4, 12)  # noisy mobile line
     sig_pow = np.mean(speech**2) + 1e-12
     noise = rng.standard_normal(n) * np.sqrt(sig_pow / (10 ** (snr_db / 10)))
     y = speech + noise

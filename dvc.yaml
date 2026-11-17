@@ -77,6 +77,8 @@ stages:
       - reports/train_run.json
       - data/features
       - src/quality_gate.py
+      - src/behavioural.py
+      - src/synthetic.py
     params:
       - quality_gate
     metrics:

@@ -21,26 +21,43 @@ from pathlib import Path
 from src.config import PROJECT_ROOT
 
 
+def _json(raw: bytes) -> dict:
+    try:
+        return json.loads(raw or b"{}")
+    except json.JSONDecodeError:
+        return {"detail": raw.decode(errors="replace")[:300]}
+
+
 def get(url: str) -> tuple[int, dict]:
     try:
         with urllib.request.urlopen(url, timeout=5) as r:
             return r.status, json.loads(r.read())
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read() or b"{}")
+        return e.code, _json(e.read())
     except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
         return 0, {"status": f"unreachable ({e})"}
 
 
-def post_wav(url: str, path: Path) -> tuple[int, dict]:
+def post_wav_bytes(
+    url: str, data: bytes, filename: str, call_id: str | None = None
+) -> tuple[int, dict]:
     boundary = uuid.uuid4().hex
-    body = (
+    parts = [
         (
             f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
-            f'filename="{path.name}"\r\nContent-Type: audio/wav\r\n\r\n'
+            f'filename="{filename}"\r\nContent-Type: audio/wav\r\n\r\n'
         ).encode()
-        + path.read_bytes()
-        + f"\r\n--{boundary}--\r\n".encode()
-    )
+        + data
+        + b"\r\n"
+    ]
+    if call_id:
+        parts.append(
+            (
+                f'--{boundary}\r\nContent-Disposition: form-data; name="call_id"\r\n\r\n'
+                f"{call_id}\r\n"
+            ).encode()
+        )
+    body = b"".join(parts) + f"--{boundary}--\r\n".encode()
     req = urllib.request.Request(
         url,
         data=body,
@@ -51,7 +68,11 @@ def post_wav(url: str, path: Path) -> tuple[int, dict]:
         with urllib.request.urlopen(req, timeout=120) as r:
             return r.status, json.loads(r.read())
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read() or b"{}")
+        return e.code, _json(e.read())
+
+
+def post_wav(url: str, path: Path) -> tuple[int, dict]:
+    return post_wav_bytes(url, path.read_bytes(), path.name)
 
 
 def main(argv: list[str] | None = None) -> int:

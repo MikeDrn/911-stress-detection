@@ -52,8 +52,38 @@ quality_gate:
   min_stressed_recall: 0.92    # zero-tolerance floor for missed danger calls
   max_p95_latency_ms: 150      # single-window CPU inference budget
   latency_trials: 100
-  auto_promote: true           # false => gate passes but a human must promote
+  # Course 7 (slide 6): a new model version is *continuous delivery* - the gate
+  # filters automatically, a human approves the promotion.
+  auto_promote: false
+  # Course 7 (slide 12): behavioural model tests on freshly synthesised clips
+  behavioural:
+    clips_per_slice: 12          # per (speaker sex x channel x class)
+    min_functionality_accuracy: 0.90
+    invariance_min_agreement: 0.95   # same decision after gain / light-noise changes
+    slice_min_recall_stressed: 0.85  # per slice floor (sex x channel)
+    slice_min_accuracy: 0.80
 
 serving:
   duress_threshold: 0.82       # theta
   consecutive_windows: 3       # windows above theta in a row before alerting
+
+rollout:                       # Course 4: online evaluation of @challenger vs @champion
+  mode: champion_only          # champion_only | shadow | canary | ab | bandit
+  canary:
+    steps: [10, 25, 50, 100]   # % of calls routed to the challenger
+    min_challenger_calls_per_step: 20
+    max_latency_ratio: 1.10    # challenger p95 <= 1.1 x champion p95 (+ slack)
+    latency_slack_ms: 3.0      # absorbs laptop timing jitter at millisecond scale
+    error_z_critical: 1.645    # one-sided 5% pooled z-test on the error rate
+    collapse_share: 0.98       # >98% windows in one class while champion is mixed
+    psi_warn: 0.10
+    psi_major: 0.25
+  ab:
+    alpha: 0.05
+    power: 0.80
+    baseline_rate: 0.85        # expected correct-decision rate of the champion
+    mde: 0.10                  # smallest improvement worth detecting (absolute)
+  bandit:
+    policy: thompson           # thompson | ucb1 | epsilon_greedy
+    epsilon: 0.10
+    floor: 0.05                # every arm keeps >= 5% of traffic

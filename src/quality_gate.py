@@ -8,6 +8,16 @@ Promote the challenger to ``@champion`` only if ALL rules hold:
 1. accuracy_challenger >= accuracy_champion + delta         (delta = 0.015)
 2. recall(stressed) of the challenger >= 0.92               (missed-danger floor)
 3. p95 single-window CPU inference latency <= 150 ms
+4. behavioural model tests (Course 7 slide 12): minimum functionality,
+   invariance to gain/noise, and accuracy/recall floors on every slice
+   (speaker sex x telephone channel)
+
+The report also states the measurement noise of the test accuracy
+(standard error, Course 7 slide 13) so the margin delta can be compared with it.
+
+Promotion is *continuous delivery* (Course 7 slide 6): with
+``auto_promote: false`` the gate only marks the version ``awaiting_approval``;
+a human promotes with ``--promote-challenger`` and can undo with ``--rollback``.
 
 With no existing champion (first run) rule 1 is skipped (bootstrap), rules 2-3
 still apply. If ``quality_gate.auto_promote`` is false the decision is recorded
@@ -81,7 +91,9 @@ def evaluate_predictor(pred: TorchStressPredictor, test: dict, trials: int) -> d
     return m
 
 
-def decide(challenger: dict, champion: dict | None, rules: dict) -> dict[str, Any]:
+def decide(
+    challenger: dict, champion: dict | None, rules: dict, behavioural: dict | None = None
+) -> dict[str, Any]:
     checks = {}
     if champion is None:
         checks["accuracy_margin"] = {"passed": True, "note": "no champion yet (bootstrap)"}
@@ -102,7 +114,38 @@ def decide(challenger: dict, champion: dict | None, rules: dict) -> dict[str, An
         "challenger_ms": challenger["p95_latency_ms"],
         "budget_ms": float(rules["max_p95_latency_ms"]),
     }
+    for name, check in (behavioural or {}).items():
+        checks[f"behavioural_{name}"] = check
     return {"passed": all(c["passed"] for c in checks.values()), "checks": checks}
+
+
+def training_channels(params: dict) -> set[str]:
+    """Telephone channels present in the training manifest (phone_* files = phone line)."""
+    from src.data_contracts import read_manifest
+
+    manifest = PROJECT_ROOT / params["data"]["manifest"]
+    if not manifest.exists():
+        return {"clean"}
+    return {
+        "phone" if Path(r["path"]).name.startswith("phone_") else "clean"
+        for r in read_manifest(manifest)
+        if r["split"] == "train"
+    }
+
+
+def measurement_noise(accuracy: float, n: int, delta: float) -> dict[str, Any]:
+    """Standard error of a test accuracy (Course 7 slide 13): is delta above the noise?"""
+    se = (accuracy * (1 - accuracy) / max(n, 1)) ** 0.5
+    return {
+        "accuracy": accuracy,
+        "n_test_windows": n,
+        "standard_error": se,
+        "two_standard_errors": 2 * se,
+        "delta": delta,
+        "delta_exceeds_2se": delta >= 2 * se,
+        "note": "windows overlap (0.5 s hop), so the effective sample is smaller than n "
+        "and the true noise is somewhat larger",
+    }
 
 
 def _load_champion(params: dict, use_mlflow: bool, tmp: Path):
@@ -131,14 +174,25 @@ def promote(params: dict, version: int | str | None, use_mlflow: bool) -> None:
         from src import registry
 
         uri, name = tracking_uri(params), params["mlflow"]["registered_model_name"]
+        c = registry.client(uri)
+        current = registry.version_by_alias(uri, name, registry.CHAMPION)
+        if current is not None and str(current.version) == str(version):
+            print(f"[gate] v{version} is already @champion")
+            return
+        if current is not None:  # remembered for a one-command rollback
+            c.set_registered_model_tag(name, "previous_champion", str(current.version))
         registry.set_alias(uri, name, registry.CHAMPION, version)
-        registry.client(uri).set_model_version_tag(
+        c.set_model_version_tag(
             name, str(version), "promoted_at", time.strftime("%Y-%m-%dT%H:%M:%S")
         )
+        c.set_model_version_tag(name, str(version), "approval", "approved")
         with tempfile.TemporaryDirectory() as td:
             path = registry.download_checkpoint(uri, name, registry.CHAMPION, td)
             shutil.copyfile(path, CHAMPION_PATH)
-        print(f"[gate] {name} v{version} is now @champion")
+        print(
+            f"[gate] {name} v{version} is now @champion"
+            + (f" (previous: v{current.version})" if current is not None else "")
+        )
     else:
         shutil.copyfile(CHALLENGER_PATH, CHAMPION_PATH)
         print(f"[gate] copied challenger -> {CHAMPION_PATH.relative_to(PROJECT_ROOT)}")
@@ -158,25 +212,50 @@ def run_gate(params: dict, use_mlflow: bool = True) -> dict[str, Any]:
 
     challenger = TorchStressPredictor.from_checkpoint(CHALLENGER_PATH, "challenger")
     ch_metrics = evaluate_predictor(challenger, test, trials)
+    behavioural = None
+    if rules.get("behavioural"):
+        from src.behavioural import run_behavioural_tests
+        from src.preprocessing import AudioSpec
+
+        behavioural = run_behavioural_tests(
+            challenger,
+            rules["behavioural"],
+            AudioSpec.from_params(params),
+            enforced_channels=training_channels(params),
+        )
 
     with tempfile.TemporaryDirectory() as td:
         champ, champ_source, champ_mv = _load_champion(params, use_mlflow, Path(td))
-        if champ_mv is not None and str(champ_mv.version) == str(run_info.get("version")):
-            print(f"[gate] v{champ_mv.version} is already @champion - nothing to compare")
+        same_as_champion = champ_mv is not None and str(champ_mv.version) == str(
+            run_info.get("version")
+        )
+        if same_as_champion:
+            print(f"[gate] v{champ_mv.version} is already @champion - re-checking it (report only)")
             champ = None
             champ_source = f"{champ_source} (same version as challenger)"
         champ_metrics = evaluate_predictor(champ, test, trials) if champ else None
 
-    decision = decide(ch_metrics, champ_metrics, rules)
+    decision = decide(ch_metrics, champ_metrics, rules, behavioural)
+    if same_as_champion:
+        decision["checks"]["accuracy_margin"]["note"] = "this version is the current champion"
     auto = bool(rules["auto_promote"])
-    promoted = decision["passed"] and auto
+    # Bootstrap: with no champion in production there is nothing to protect, so the
+    # first model that passes the gate is promoted even when a human must approve later ones.
+    bootstrap = champ_metrics is None and champ_source.startswith("none")
+    promoted = decision["passed"] and (auto or bootstrap)
     report = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "test_windows": int(len(test["y"])),
         "challenger": {"version": run_info.get("version"), **ch_metrics},
         "champion": {"source": champ_source, **(champ_metrics or {})},
         "decision": decision,
+        "measurement_noise": measurement_noise(
+            (champ_metrics or ch_metrics)["accuracy"],
+            int(len(test["y"])),
+            float(rules["min_accuracy_margin"]),
+        ),
         "auto_promote": auto,
+        "bootstrap": bootstrap,
         "promoted": promoted,
     }
 
@@ -191,15 +270,25 @@ def run_gate(params: dict, use_mlflow: bool = True) -> dict[str, Any]:
                 {f"test_{k}": v for k, v in ch_metrics.items() if isinstance(v, int | float)}
             )
             mlflow.set_tag("quality_gate_passed", str(decision["passed"]))
-        registry.client(tracking_uri(params)).set_model_version_tag(
+            mlflow.log_dict(report, "gate/quality_gate_report.json")  # stored with the version
+        c = registry.client(tracking_uri(params))
+        c.set_model_version_tag(
             run_info["model_name"],
             str(run_info["version"]),
             "quality_gate",
             "passed" if decision["passed"] else "failed",
         )
+        if decision["passed"] and not auto and not same_as_champion and not promoted:
+            c.set_model_version_tag(
+                run_info["model_name"], str(run_info["version"]), "approval", "awaiting_approval"
+            )
 
     if promoted:
+        if bootstrap and not auto:
+            print("[gate] bootstrap: no champion in production yet -> promoting the first model")
         promote(params, run_info.get("version"), use_mlflow)
+    elif same_as_champion:
+        print("[gate] report only - this version is already in production")
     elif decision["passed"]:
         print("[gate] PASSED but auto_promote=false -> awaiting human approval")
     else:
@@ -213,10 +302,51 @@ def run_gate(params: dict, use_mlflow: bool = True) -> dict[str, Any]:
             + ", ".join(
                 f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}"
                 for k, v in c.items()
-                if k != "passed"
+                if k != "passed" and not isinstance(v, dict)
             )
         )
+        for sl, v in c.get("slices", {}).items():
+            status = "ok" if v["passed"] else "BELOW FLOOR"
+            if not v["passed"] and not v.get("enforced", True):
+                status = "WARNING: coverage gap (no training data for this channel yet)"
+            print(
+                f"[gate]        slice {sl:13s} acc={v['accuracy']:.3f} "
+                f"recall_stressed={v['recall_stressed']:.3f} {status}"
+            )
+
+    noise = report["measurement_noise"]
+    print(
+        f"[gate] noise: SE={noise['standard_error']:.4f}  2*SE={noise['two_standard_errors']:.4f}"
+        f"  delta={noise['delta']:.3f}"
+    )
     return report
+
+
+def rollback(params: dict) -> None:
+    """Course 7 slide 24: rollback = move @champion back to the previous version."""
+    from src import registry
+
+    uri, name = tracking_uri(params), params["mlflow"]["registered_model_name"]
+    c = registry.client(uri)
+    prev = c.get_registered_model(name).tags.get("previous_champion")
+    if not prev:
+        raise SystemExit("[gate] no previous_champion recorded - nothing to roll back to")
+    current = registry.version_by_alias(uri, name, registry.CHAMPION)
+    promote(params, prev, use_mlflow=True)
+    if current is not None:
+        c.set_model_version_tag(name, str(current.version), "approval", "rolled_back")
+    print(f"[gate] ROLLBACK: @champion -> v{prev}")
+
+
+def promote_challenger(params: dict) -> None:
+    """Human approval step: promote whatever version currently holds @challenger."""
+    from src import registry
+
+    uri, name = tracking_uri(params), params["mlflow"]["registered_model_name"]
+    mv = registry.version_by_alias(uri, name, registry.CHALLENGER)
+    if mv is None:
+        raise SystemExit("[gate] no @challenger alias")
+    promote(params, mv.version, use_mlflow=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -224,8 +354,24 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-mlflow", action="store_true")
     ap.add_argument("--strict", action="store_true", help="exit 1 when the gate fails")
     ap.add_argument("--promote-version", help="manual (human-approved) promotion of version N")
+    ap.add_argument(
+        "--promote-challenger",
+        action="store_true",
+        help="human approval: promote the current @challenger",
+    )
+    ap.add_argument(
+        "--rollback",
+        action="store_true",
+        help="move @champion back to the previously promoted version",
+    )
     args = ap.parse_args(argv)
     params = load_params()
+    if args.rollback:
+        rollback(params)
+        return 0
+    if args.promote_challenger:
+        promote_challenger(params)
+        return 0
     if args.promote_version:
         promote(params, args.promote_version, use_mlflow=not args.no_mlflow)
         return 0

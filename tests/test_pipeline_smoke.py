@@ -34,6 +34,14 @@ def test_full_pipeline_offline(tmp_path):
     params["quality_gate"]["latency_trials"] = 10
     params["quality_gate"]["min_stressed_recall"] = 0.0  # 1 epoch on 20 clips: not a quality test
     params["quality_gate"]["max_p95_latency_ms"] = 10_000
+    params["quality_gate"]["auto_promote"] = False  # first model is still promoted (bootstrap)
+    params["quality_gate"]["behavioural"].update(  # still executed, floors relaxed
+        clips_per_slice=1,
+        min_functionality_accuracy=0.0,
+        invariance_min_agreement=0.0,
+        slice_min_recall_stressed=0.0,
+        slice_min_accuracy=0.0,
+    )
     (proj / "params.yaml").write_text(yaml.safe_dump(params))
 
     env = {**os.environ, "PYTHONPATH": str(proj), "PARAMS_PATH": str(proj / "params.yaml")}
@@ -51,6 +59,7 @@ def test_full_pipeline_offline(tmp_path):
         return res.stdout
 
     run("scripts.generate_synthetic_data")
+    run("scripts.generate_synthetic_data", "--channel", "phone", "--clips-per-class", "4")
     run("src.data_contracts", "prepare")
     assert "all data contracts satisfied" in run("src.data_contracts", "validate")
     run("src.features")
@@ -58,6 +67,10 @@ def test_full_pipeline_offline(tmp_path):
     run("src.quality_gate", "--no-mlflow")
 
     gate = json.loads((proj / "reports" / "quality_gate.json").read_text())
-    assert gate["promoted"] is True  # bootstrap promotion with relaxed floors
+    assert (
+        gate["promoted"] is True and gate["bootstrap"] is True
+    )  # bootstrap promotion with relaxed floors
     assert (proj / "models" / "champion.pt").exists()
     assert gate["challenger"]["p95_latency_ms"] > 0
+    assert "behavioural_slice_floors_sex_x_channel" in gate["decision"]["checks"]
+    assert gate["measurement_noise"]["standard_error"] > 0

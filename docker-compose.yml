@@ -2,7 +2,11 @@
 #
 #   docker compose up -d mlflow-server      # 1. tracking server (needed for training)
 #   uv run dvc repro                        # 2. train + gate on the host -> @champion
-#   docker compose up -d --build            # 3. full stack
+#   docker compose up -d --build            # 3. full stack (images built locally)
+#
+# Course 7 "build once, promote the same image": to run the exact images CI
+# built and pushed for a commit, set IMAGE_REGISTRY / IMAGE_TAG (see .env.example)
+# and use  docker compose pull  +  docker compose up -d --no-build
 #
 # All three services share the private bridge network `911-net` and find each
 # other by service name (http://stress-api:8000, http://mlflow-server:5000).
@@ -21,7 +25,7 @@ services:
   mlflow-server:
     <<: *common
     build: { context: ., target: mlflow }
-    image: voice-stress-911/mlflow-server:1.0.0
+    image: ${IMAGE_REGISTRY:-voice-stress-911}/mlflow-server:${IMAGE_TAG:-local}
     container_name: mlflow-server
     ports:
       - "127.0.0.1:${MLFLOW_HOST_PORT:-5000}:5000"
@@ -37,7 +41,7 @@ services:
   stress-api:
     <<: *common
     build: { context: ., target: api }
-    image: voice-stress-911/stress-api:1.0.0
+    image: ${IMAGE_REGISTRY:-voice-stress-911}/stress-api:${IMAGE_TAG:-local}
     container_name: stress-api
     environment:
       MODEL_SOURCE: ${MODEL_SOURCE:-auto}            # auto = MLflow @champion, else models/champion.pt
@@ -48,6 +52,8 @@ services:
       TELEMETRY_DB: /app/telemetry/telemetry.db
       MODEL_LOAD_DELAY_SECONDS: ${MODEL_LOAD_DELAY_SECONDS:-5}   # makes the 503 phase visible
       FAKE_SCORES: ${FAKE_SCORES:-}
+      FAKE_CHALLENGER_SCORES: ${FAKE_CHALLENGER_SCORES:-}
+      MODEL_POLL_SECONDS: ${MODEL_POLL_SECONDS:-15}  # follow @champion/@challenger moves live
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
@@ -73,7 +79,7 @@ services:
   dispatcher-ui:
     <<: *common
     build: { context: ., target: ui }
-    image: voice-stress-911/dispatcher-ui:1.0.0
+    image: ${IMAGE_REGISTRY:-voice-stress-911}/dispatcher-ui:${IMAGE_TAG:-local}
     container_name: dispatcher-ui
     environment:
       API_URL: http://stress-api:8000

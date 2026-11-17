@@ -42,7 +42,8 @@ Per call: WAV upload → **data contract** (16 kHz, mono, WAV, ≥ 2 s) → **2.
 | Features | librosa Log-Mel + MFCC | `src/preprocessing.py` |
 | Model | ResNet-18 (2-D Log-Mel / 1-D MFCC) | `src/model.py` |
 | Experiments and registry | MLflow (SQLite backend), aliases | `src/train.py`, `src/registry.py` |
-| Promotion gate | champion vs challenger | `src/quality_gate.py` |
+| Promotion gate | champion vs challenger, behavioural tests, human approval | `src/quality_gate.py`, `src/behavioural.py` |
+| Online evaluation (Course 4) | shadow, canary, A/B test, bandits | `src/rollout.py`, `src/bandits.py` |
 | Serving | FastAPI with readiness probes | `src/serve.py` |
 | Telemetry and audit | async SQLite (aiosqlite) | `src/telemetry.py` |
 | Operator UI | Streamlit | `src/ui.py` |
@@ -53,21 +54,25 @@ Per call: WAV upload → **data contract** (16 kHz, mono, WAV, ≥ 2 s) → **2.
 
 ```
 911-stress-detection/
-├── .github/workflows/ci.yml     # lint → data contracts → pytest (FakeModel) → smoke → docker
+├── .github/workflows/ci.yml     # CI: lint → contracts → tests → smoke → images; CD: push SHA tag → approval
 ├── Dockerfile                   # multi-stage: targets api | ui | mlflow
 ├── docker-compose.yml           # stress-api, mlflow-server, dispatcher-ui on 911-net
 ├── dvc.yaml                     # reproducible pipeline definition
-├── params.yaml                  # every tunable number (θ, window, hop, lr, gate rules…)
+├── params.yaml                  # every tunable number (θ, gate rules, canary steps, A/B, bandit…)
 ├── pyproject.toml               # uv project; extras: ml, api, tracking, ui; dev group
-├── .env.example                 # compose overrides (MODEL_SOURCE, delays, ports)
+├── .env.example                 # compose overrides (MODEL_SOURCE, delays, ports, image tags)
 ├── scripts/
-│   ├── generate_synthetic_data.py  # demo corpus → data/raw/{calm,stressed}
-│   ├── make_demo_calls.py          # 4 demo calls → data/demo
+│   ├── generate_synthetic_data.py  # corpus → data/raw/{calm,stressed}; --channel phone = data shift
+│   ├── make_demo_calls.py          # 5 demo calls → data/demo
+│   ├── simulate_traffic.py         # labelled calls + dispatcher feedback (Course 4 demos)
+│   ├── make_broken_challenger.py   # sabotaged @challenger → automatic canary rollback demo
 │   ├── convert_audio.py            # any recording → 16 kHz mono WAV
 │   └── smoke_test.py               # post-deploy probe + /predict check
 ├── src/
 │   ├── config.py  preprocessing.py  synthetic.py  data_contracts.py  features.py
 │   ├── model.py   fake_model.py     train.py      quality_gate.py     registry.py
+│   ├── behavioural.py               # Course 7: min-functionality / invariance / slice tests
+│   ├── rollout.py  bandits.py       # Course 4: shadow, canary, A/B statistics, bandit policies
 │   ├── mlflow_model.py  alerting.py  telemetry.py  serve.py  ui.py
 └── tests/
     ├── conftest.py               # WAV factory + FakeModel API client
@@ -76,6 +81,10 @@ Per call: WAV upload → **data contract** (16 kHz, mono, WAV, ≥ 2 s) → **2.
     ├── test_alerting.py          # θ / consecutive-window rule
     ├── test_model.py             # ResNet-18 adaptations, checkpoint round-trip
     ├── test_api.py               # 503→200 probes, /predict schema, 422s, audit log
+    ├── test_rollout.py           # canary/A-B statistics vs the Course 4 worked examples
+    ├── test_bandits.py           # ε-greedy, UCB1, Thompson, regret vs A/B
+    ├── test_api_rollout.py       # shadow, canary rollback, A/B, bandit through the API
+    ├── test_behavioural.py       # behavioural tests with FakeModels
     └── test_pipeline_smoke.py    # (slow) whole pipeline offline, 1 epoch
 ```
 
@@ -197,7 +206,7 @@ uv run dvc repro
 | `validate` | 16 kHz/mono/WAV format, hash integrity, **cross-split SHA-256 leakage**, class-ratio floor ≥ 30 %. A non-zero exit **stops the pipeline**. | Data contracts as gates |
 | `featurize` | 2 s / 0.5 s windows → Log-Mel + MFCC tensors | Same code online and offline, so no training/serving skew |
 | `train` | ResNet-18, about 1–2 min on CPU. Params, curves, git commit and DVC data hash go to MLflow. The model is registered with alias **@challenger**. | Experiment tracking, lineage |
-| `quality_gate` | Challenger vs champion on the **same** test split: accuracy ≥ champion + 0.015, stressed recall ≥ 0.92, p95 latency ≤ 150 ms. On the first run there's no champion, so it is bootstrapped. | Automated, rule-based promotion |
+| `quality_gate` | Challenger vs champion on the **same** test split: accuracy ≥ champion + 0.015, stressed recall ≥ 0.92, p95 latency ≤ 150 ms, and behavioural tests (functionality, invariance, slice floors). The first model is promoted automatically (bootstrap); later ones wait for human approval. | Automated, rule-based promotion |
 
 Then inspect the results:
 
@@ -286,33 +295,25 @@ Open <http://localhost:8501>.
 
 The interactive API docs are at <http://localhost:8000/docs>.
 
-### Step 12: Champion vs challenger and hot reload
+### Step 12: Champion vs challenger, human approval and rollback
 
-Make a change, for example in `params.yaml` set `train: architecture: resnet18_1d` (the MFCC
-1-D variant), then:
-
-```bash
-uv run dvc repro
-```
-
-Only `train` and `quality_gate` re-run. Version 2 becomes `@challenger`, and the gate compares it
-with `@champion` on the same test data. With the synthetic data, v1 already scores about 99 %,
-so a challenger usually **cannot beat it by 1.5 points**, and you'll see
-`FAIL accuracy_margin … champion unchanged`. That's the gate protecting production.
-
-For a **human-approved** promotion and a zero-restart model swap:
+The full Course 4 / Course 7 scenario (data shift → retraining → shadow → canary → A/B →
+bandit → approval → rollback) is in **section 3b** below. The core idea in three commands:
 
 ```bash
-uv run python -m src.quality_gate --promote-version 2
+uv run dvc repro                                  # new version -> @challenger, gate decides
+uv run python -m src.quality_gate --promote-challenger   # a human approves
+uv run python -m src.quality_gate --rollback             # undo in one command
 ```
 
-Then click **⬆️ Hot-reload @champion** in the console sidebar, or run
-`curl.exe -X POST http://localhost:8000/admin/reload`. The API keeps serving the old model until
-the new one is loaded, and the sidebar then shows `v2`.
+With `auto_promote: false`, a passing challenger is tagged `awaiting_approval` in MLflow and is
+**not** promoted on its own. The only exception is the very first model, when there is no
+champion to protect (bootstrap). The API checks the aliases every 15 s and hot-swaps models
+without dropping traffic. You can also click **⬆️ Hot-reload models** in the console.
 
 **Why:** models are promoted by **moving an alias** in the registry, never by copying files by
-hand. Every version keeps its run, parameters, data hash and gate result. Rollback means pointing
-`@champion` back at the old version and reloading.
+hand. Every version keeps its run, parameters, data hash and gate report. Rollback means
+pointing `@champion` back at the previous version.
 
 ### Step 13: Demonstrate the readiness probe on stage
 
@@ -367,6 +368,52 @@ real stack.
 
 ---
 
+## 3b. Release engineering (Course 4) and CI/CD (Course 7)
+
+**The scenario.** The production model (v1) was trained on clean recordings. New calls start
+arriving over noisy, narrow-band mobile lines (a *distribution shift*). The behavioural slice
+tests show that v1 now fails on one slice (female voices on phone lines). Continuous training
+produces v2 on the new data. The offline gate passes v2, but it is **not** promoted
+automatically: it must first earn trust on live traffic.
+
+```bash
+# continuous training (new data -> new challenger)
+uv run python -m scripts.generate_synthetic_data --channel phone
+uv run dvc add data/raw
+uv run dvc repro                 # v2 registered as @challenger, gate PASS, "awaiting_approval"
+
+# the API picks up @challenger within 15 s; open the console's Release tab
+uv run python -m scripts.simulate_traffic --calls 200                     # shadow
+uv run python -m scripts.simulate_traffic --calls 600 --until-decision    # canary
+uv run python -m scripts.make_broken_challenger                           # rollback demo
+uv run python -m scripts.make_broken_challenger --restore
+uv run python -m scripts.simulate_traffic --calls 1000 --until-decision   # A/B test
+uv run python -m scripts.simulate_traffic --calls 300                     # bandit
+
+# continuous delivery: a human approves, rollback is one command
+uv run python -m src.quality_gate --promote-challenger
+uv run python -m src.quality_gate --rollback
+```
+
+| Course concept | Where it lives |
+|---|---|
+| Shadow deployment | `rollout.mode: shadow`. The challenger scores every call in a background task; dispatchers never see it |
+| Canary: steps, sticky routing, guardrails, automatic rollback | `src/rollout.py::canary_decision`, evaluated after every call |
+| One-sided pooled z-test, p95 latency ratio, PSI / KS, class collapse | `src/rollout.py` |
+| A/B test: pre-computed sample size, no peeking, unpooled CI, SRM | `src/rollout.py::ab_report` |
+| Bandits: ε-greedy, UCB1, Thompson, traffic floor, logged propensities, regret | `src/bandits.py` |
+| Delayed reward | `POST /feedback` (console buttons or the simulator) |
+| Fallback pattern | a failing challenger falls back to the champion and is counted as an error |
+| Behavioural model tests and gate report with standard error | `src/behavioural.py`, `src/quality_gate.py` |
+| Continuous delivery with human approval | `auto_promote: false`, `--promote-challenger`, `release` job in the `production` environment |
+| Build once, tag with the commit SHA | `images` job: build → boot → probe → push the same images to GHCR |
+| Two release trains | code = image tag; model = MLflow alias, followed live by the API (`MODEL_POLL_SECONDS`) |
+| Rollback in one command | `--rollback` moves `@champion` back to the previous version |
+
+> In a 911 setting, A/B tests and bandits deliberately send some real calls to the worse
+> model. They are demonstrated here **on simulated traffic only**. The real release path is
+> shadow → canary → human approval.
+
 ## 4. Troubleshooting
 
 | Symptom | Fix |
@@ -379,6 +426,9 @@ real stack.
 | Docker build runs out of memory (Windows) | Docker Desktop → Settings → Resources: give WSL 2 at least 4 GB. |
 | `dvc repro` says *data/raw does not exist* | Run Step 5. After a fresh clone, use `uv run dvc pull` instead. |
 | Your own recording returns 422 | `uv run python -m scripts.convert_audio in.m4a data/demo/mine.wav` (MP3/M4A need FFmpeg). |
+| Release tab says "no @challenger model loaded" | `@challenger` must point to a different version than `@champion`. Train one (`dvc repro` with new data), then wait 15 s or click *Hot-reload models*. |
+| CI `test` job fails at `uv sync --locked` | `uv.lock` is missing or stale. Run `uv lock`, then commit and push `uv.lock`. |
+| `release` job never asks for approval | GitHub → Settings → Environments → **production** → add yourself under *Required reviewers*. On a private repo, this needs a paid plan. |
 | Intel Mac: torch fails to install | PyTorch no longer ships Intel-Mac wheels. Run the stack in Docker (Step 9) and train on another machine. |
 
 ## 5. Configuration reference
