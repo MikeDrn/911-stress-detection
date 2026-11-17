@@ -74,6 +74,13 @@ def main(argv: list[str] | None = None) -> int:
         help="share of covert calls in the traffic (rest split genuine/non-emergency)",
     )
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument(
+        "--mode",
+        choices=["champion_only", "shadow", "canary", "ab", "bandit"],
+        help="start this rollout mode on the API before sending traffic "
+        "(the API stays in champion_only until a mode is started)",
+    )
+    ap.add_argument("--policy", choices=["thompson", "ucb1", "epsilon_greedy"])
     ap.add_argument("--no-feedback", action="store_true")
     ap.add_argument(
         "--until-decision",
@@ -107,6 +114,15 @@ def main(argv: list[str] | None = None) -> int:
     if code != 200:
         print(f"[sim] API not ready (HTTP {code}): {health}", file=sys.stderr)
         return 1
+    if args.mode:
+        if args.mode != "champion_only" and not health.get("challenger_version"):
+            print("[sim] no @challenger loaded - register V2 first", file=sys.stderr)
+            return 1
+        body = {"mode": args.mode, **({"policy": args.policy} if args.policy else {})}
+        code, started = post_json(f"{args.url}/rollout", body)
+        if code != 200:
+            print(f"[sim] could not start {args.mode} (HTTP {code}): {started}", file=sys.stderr)
+            return 1
     _, ro = get(f"{args.url}/rollout")
     print(
         f"[sim] mode={ro.get('mode')} status={ro.get('status')} "
