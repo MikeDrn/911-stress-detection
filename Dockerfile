@@ -35,7 +35,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM api-deps AS api
 COPY params.yaml ./
 COPY src ./src
-RUN mkdir -p /app/telemetry /app/models && chown -R app:app /app/telemetry
+RUN mkdir -p /app/telemetry /app/models /tmp/numba_cache \
+ && chown -R app:app /app/telemetry /tmp/numba_cache
+# librosa's numba functions are compiled with cache=True. The non-root `app` user
+# cannot write into site-packages, so numba needs a writable cache directory,
+# otherwise `import librosa` raises "cannot cache function ... no locator available".
+ENV NUMBA_CACHE_DIR=/tmp/numba_cache \
+    HOME=/tmp
 USER app
 EXPOSE 8000
 # Readiness: 503 while weights load -> "starting"; 200 -> "healthy".

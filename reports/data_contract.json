@@ -1,0 +1,56 @@
+{
+  "passed": true,
+  "checks": {
+    "non_empty": {
+      "passed": true,
+      "n_rows": 160
+    },
+    "audio_format_16k_mono_wav": {
+      "passed": true,
+      "violations": [],
+      "n_violations": 0
+    },
+    "sha256_integrity": {
+      "passed": true,
+      "mismatched": []
+    },
+    "no_train_test_leakage_sha256": {
+      "passed": true,
+      "leaked_hashes": {}
+    },
+    "no_label_conflicts": {
+      "passed": true,
+      "conflicts": {}
+    },
+    "class_distribution_floor": {
+      "passed": true,
+      "floor": 0.3,
+      "overall": {
+        "calm": 0.5,
+        "stressed": 0.5
+      },
+      "per_split": {
+        "train": {
+          "calm": 0.5,
+          "stressed": 0.5
+        },
+        "val": {
+          "calm": 0.5,
+          "stressed": 0.5
+        },
+        "test": {
+          "calm": 0.5,
+          "stressed": 0.5
+        }
+      }
+    },
+    "all_splits_present": {
+      "passed": true,
+      "present": [
+        "test",
+        "train",
+        "val"
+      ]
+    }
+  }
+}

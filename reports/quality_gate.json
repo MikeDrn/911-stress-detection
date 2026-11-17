@@ -1,0 +1,44 @@
+{
+  "timestamp": "2026-11-17T16:19:26",
+  "test_windows": 176,
+  "challenger": {
+    "version": 1,
+    "accuracy": 0.9886363636363636,
+    "recall_stressed": 0.9775280898876404,
+    "recall_calm": 1.0,
+    "precision_stressed": 1.0,
+    "f1_stressed": 0.9886363636363636,
+    "false_alarm_rate": 0.0,
+    "confusion_matrix": {
+      "tn": 87,
+      "fp": 0,
+      "fn": 2,
+      "tp": 87
+    },
+    "p95_latency_ms": 7.180010000593028
+  },
+  "champion": {
+    "source": "none (no @champion alias yet)"
+  },
+  "decision": {
+    "passed": true,
+    "checks": {
+      "accuracy_margin": {
+        "passed": true,
+        "note": "no champion yet (bootstrap)"
+      },
+      "stressed_recall_floor": {
+        "passed": true,
+        "challenger": 0.9775280898876404,
+        "required": 0.92
+      },
+      "p95_latency": {
+        "passed": true,
+        "challenger_ms": 7.180010000593028,
+        "budget_ms": 150.0
+      }
+    }
+  },
+  "auto_promote": true,
+  "promoted": true
+}

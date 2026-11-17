@@ -1,0 +1,6 @@
+{
+  "mlflow": true,
+  "run_id": "942ee956e95e419a998d982e9a0a5dd9",
+  "model_name": "voice-stress-detector",
+  "version": 1
+}

@@ -1,0 +1,182 @@
+schema: '2.0'
+stages:
+  prepare:
+    cmd: python -m src.data_contracts prepare
+    deps:
+    - path: data/raw
+      hash: md5
+      md5: 4fec2eb0c5fbdaa37f023102e29580c2.dir
+      size: 23206352
+      nfiles: 160
+    - path: src/data_contracts.py
+      hash: md5
+      md5: 2501e270893e8a52aa7e4d91edad3436
+      size: 10330
+    - path: src/preprocessing.py
+      hash: md5
+      md5: 9601272eea66574da1f77939795f81ab
+      size: 9032
+    params:
+      params.yaml:
+        data.classes:
+        - calm
+        - stressed
+        data.seed: 42
+        data.test_fraction: 0.2
+        data.val_fraction: 0.1
+    outs:
+    - path: data/manifests/manifest.csv
+      hash: md5
+      md5: 650ce56bceffb036d6c633d78f092926
+      size: 20474
+  validate:
+    cmd: python -m src.data_contracts validate
+    deps:
+    - path: data/manifests/manifest.csv
+      hash: md5
+      md5: 650ce56bceffb036d6c633d78f092926
+      size: 20474
+    - path: data/raw
+      hash: md5
+      md5: 4fec2eb0c5fbdaa37f023102e29580c2.dir
+      size: 23206352
+      nfiles: 160
+    - path: src/data_contracts.py
+      hash: md5
+      md5: 2501e270893e8a52aa7e4d91edad3436
+      size: 10330
+    params:
+      params.yaml:
+        audio:
+          sample_rate: 16000
+          channels: 1
+          window_seconds: 2.0
+          hop_seconds: 0.5
+          min_duration_seconds: 2.0
+          max_duration_seconds: 600
+        data.min_class_ratio: 0.3
+    outs:
+    - path: reports/data_contract.json
+      hash: md5
+      md5: ae2ba4523a90eb9ef5917055d2e56111
+      size: 1072
+  featurize:
+    cmd: python -m src.features
+    deps:
+    - path: data/manifests/manifest.csv
+      hash: md5
+      md5: 650ce56bceffb036d6c633d78f092926
+      size: 20474
+    - path: reports/data_contract.json
+      hash: md5
+      md5: ae2ba4523a90eb9ef5917055d2e56111
+      size: 1072
+    - path: src/features.py
+      hash: md5
+      md5: 1dac1e54b02ef6999df78a6a3a5c7bd0
+      size: 3160
+    - path: src/preprocessing.py
+      hash: md5
+      md5: 9601272eea66574da1f77939795f81ab
+      size: 9032
+    params:
+      params.yaml:
+        audio:
+          sample_rate: 16000
+          channels: 1
+          window_seconds: 2.0
+          hop_seconds: 0.5
+          min_duration_seconds: 2.0
+          max_duration_seconds: 600
+        features:
+          n_mels: 64
+          n_fft: 400
+          hop_length: 160
+          n_mfcc: 20
+          fmin: 50
+          fmax: 8000
+    outs:
+    - path: data/features
+      hash: md5
+      md5: b8f874582509090e2566609c8a5bdead.dir
+      size: 54610095
+      nfiles: 4
+  train:
+    cmd: python -m src.train
+    deps:
+    - path: data/features
+      hash: md5
+      md5: b8f874582509090e2566609c8a5bdead.dir
+      size: 54610095
+      nfiles: 4
+    - path: src/mlflow_model.py
+      hash: md5
+      md5: 97b33b9b0f457066673c5ba5b382e382
+      size: 1073
+    - path: src/model.py
+      hash: md5
+      md5: aaedaeadfc5de052dfa83b72837b4613
+      size: 6610
+    - path: src/train.py
+      hash: md5
+      md5: ed34aabc818fa58a427981f3f6142218
+      size: 9959
+    params:
+      params.yaml:
+        mlflow:
+          tracking_uri: http://localhost:5000
+          experiment_name: voice-stress-911
+          registered_model_name: voice-stress-detector
+        train:
+          architecture: resnet18_2d
+          epochs: 6
+          batch_size: 32
+          learning_rate: 0.001
+          weight_decay: 0.0001
+          seed: 7
+    outs:
+    - path: models/challenger.pt
+      hash: md5
+      md5: fb1d755bc456134d29fde985aec3aed6
+      size: 44763339
+    - path: reports/train_metrics.json
+      hash: md5
+      md5: e3a1ec6460f20c63dc9b9eba5ce9bf15
+      size: 213
+    - path: reports/train_run.json
+      hash: md5
+      md5: cd606cabf8358942b40a5a30afbe5c2a
+      size: 130
+  quality_gate:
+    cmd: python -m src.quality_gate
+    deps:
+    - path: data/features
+      hash: md5
+      md5: b8f874582509090e2566609c8a5bdead.dir
+      size: 54610095
+      nfiles: 4
+    - path: models/challenger.pt
+      hash: md5
+      md5: fb1d755bc456134d29fde985aec3aed6
+      size: 44763339
+    - path: reports/train_run.json
+      hash: md5
+      md5: cd606cabf8358942b40a5a30afbe5c2a
+      size: 130
+    - path: src/quality_gate.py
+      hash: md5
+      md5: 2c23ea7be3a749520748793041537457
+      size: 9695
+    params:
+      params.yaml:
+        quality_gate:
+          min_accuracy_margin: 0.015
+          min_stressed_recall: 0.92
+          max_p95_latency_ms: 150
+          latency_trials: 100
+          auto_promote: true
+    outs:
+    - path: reports/quality_gate.json
+      hash: md5
+      md5: 0699576a4ab066600e34f093fb3464d5
+      size: 1022
