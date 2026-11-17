@@ -1,44 +1,150 @@
 {
-  "timestamp": "2026-11-17T16:19:26",
-  "test_windows": 176,
+  "timestamp": "2026-11-17T22:50:06",
   "challenger": {
-    "version": 1,
-    "accuracy": 0.9886363636363636,
-    "recall_stressed": 0.9775280898876404,
-    "recall_calm": 1.0,
-    "precision_stressed": 1.0,
-    "f1_stressed": 0.9886363636363636,
-    "false_alarm_rate": 0.0,
-    "confusion_matrix": {
-      "tn": 87,
-      "fp": 0,
-      "fn": 2,
-      "tp": 87
-    },
-    "p95_latency_ms": 7.180010000593028
+    "version": 2,
+    "threat_accuracy": 0.9738095238095238,
+    "covert_recall": 0.9333333333333333,
+    "covert_review_or_alert": 1.0,
+    "alert_precision": 0.9739130434782609,
+    "genuine_emergency_false_alarm_rate": 0.0,
+    "non_emergency_false_alarm_rate": 0.025,
+    "voice_window_accuracy": 0.8535620052770448,
+    "voice_recall_stressed": 0.8872549019607843,
+    "voice_recall_calm": 0.8142857142857143,
+    "text_accuracy": 0.9571428571428572,
+    "simulated_calls": 420,
+    "p95_voice_latency_ms": 6.771079997997731,
+    "p95_text_latency_ms": 0.07342497701756655
   },
   "champion": {
-    "source": "none (no @champion alias yet)"
+    "source": "mlflow:covert-call-detector@champion(v1)",
+    "threat_accuracy": 0.9547619047619048,
+    "covert_recall": 0.9833333333333333,
+    "covert_review_or_alert": 1.0,
+    "alert_precision": 0.8740740740740741,
+    "genuine_emergency_false_alarm_rate": 0.0,
+    "non_emergency_false_alarm_rate": 0.14166666666666666,
+    "voice_window_accuracy": 0.7025065963060686,
+    "voice_recall_stressed": 0.9338235294117647,
+    "voice_recall_calm": 0.4328571428571429,
+    "text_accuracy": 0.9571428571428572,
+    "simulated_calls": 420,
+    "p95_voice_latency_ms": 7.251010011532344,
+    "p95_text_latency_ms": 0.07907002000138164
   },
   "decision": {
     "passed": true,
     "checks": {
       "accuracy_margin": {
         "passed": true,
-        "note": "no champion yet (bootstrap)"
+        "challenger": 0.9738095238095238,
+        "required": 0.9697619047619048
       },
-      "stressed_recall_floor": {
+      "covert_recall_floor": {
         "passed": true,
-        "challenger": 0.9775280898876404,
-        "required": 0.92
+        "challenger": 0.9333333333333333,
+        "required": 0.9
+      },
+      "genuine_emergency_false_alarm_ceiling": {
+        "passed": true,
+        "challenger": 0.0,
+        "maximum": 0.05
+      },
+      "voice_model_accuracy_floor": {
+        "passed": true,
+        "challenger": 0.8535620052770448,
+        "required": 0.65
       },
       "p95_latency": {
         "passed": true,
-        "challenger_ms": 7.180010000593028,
+        "challenger_ms": 6.771079997997731,
         "budget_ms": 150.0
+      },
+      "behavioural_content_min_functionality": {
+        "passed": true,
+        "accuracy": 1.0,
+        "required": 0.9,
+        "missed": []
+      },
+      "behavioural_content_invariance_slots_and_asr_noise": {
+        "passed": true,
+        "agreement": 0.98,
+        "required": 0.9
+      },
+      "behavioural_directional_genuine_emergency_max_stress_no_alert": {
+        "passed": true,
+        "alert_rate": 0.0,
+        "maximum": 0.02
+      },
+      "behavioural_directional_covert_calm_voice_still_alerts": {
+        "passed": true,
+        "alert_rate": 0.8666666666666667,
+        "minimum": 0.85
+      },
+      "behavioural_voice_slice_floors_sex_x_channel": {
+        "passed": true,
+        "slices": {
+          "female/clean": {
+            "accuracy": 0.8767123287671232,
+            "recall_stressed": 0.8723404255319149,
+            "passed": true,
+            "enforced": true,
+            "clips": 40
+          },
+          "female/phone": {
+            "accuracy": 0.8970588235294118,
+            "recall_stressed": 0.8709677419354839,
+            "passed": true,
+            "enforced": true,
+            "clips": 40
+          },
+          "male/clean": {
+            "accuracy": 0.90625,
+            "recall_stressed": 0.9705882352941176,
+            "passed": true,
+            "enforced": true,
+            "clips": 40
+          },
+          "male/phone": {
+            "accuracy": 0.7966101694915254,
+            "recall_stressed": 0.7083333333333334,
+            "passed": true,
+            "enforced": true,
+            "clips": 40
+          }
+        },
+        "enforced_channels": [
+          "clean",
+          "phone"
+        ],
+        "coverage_gap_warnings": [],
+        "required_accuracy": 0.6,
+        "required_recall_stressed": 0.55
       }
     }
   },
-  "auto_promote": true,
-  "promoted": true
+  "measurement_noise": {
+    "accuracy": 0.9547619047619048,
+    "n_simulated_calls": 420,
+    "standard_error": 0.01014086616678658,
+    "two_standard_errors": 0.02028173233357316,
+    "delta": 0.015,
+    "delta_exceeds_2se": false
+  },
+  "sanity_checks": {
+    "keyword_rule_test": {
+      "accuracy": 0.8452380952380952,
+      "covert_recall": 0.49166666666666664,
+      "false_alarms": 4
+    },
+    "shuffled_labels_text_accuracy": 0.32142857142857145
+  },
+  "stress_profile_assumption": {
+    "genuine_emergency": 0.8,
+    "covert": 0.6,
+    "non_emergency": 0.1
+  },
+  "auto_promote": false,
+  "bootstrap": false,
+  "promoted": false
 }

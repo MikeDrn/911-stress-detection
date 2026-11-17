@@ -139,3 +139,26 @@ def test_assign_splits_keeps_duplicates_together_and_is_deterministic():
     assert len({r["split"] for r in a if r["sha256"] == "h3"}) == 1
     assert check_leakage(a) == {}
     assert {r["split"] for r in a} == {"train", "val", "test"}
+
+
+# ------------------------------------------------------------ speaker leakage
+def test_speaker_of_parses_cremad_and_phone_copies():
+    from src.data_contracts import speaker_of
+
+    assert speaker_of("data/raw/calm/cremad_1001_DFA_NEU_XX.wav") == "cremad1001"
+    assert speaker_of("data/raw/calm/phone_cremad_1001_DFA_NEU_XX.wav") == "cremad1001"
+    assert speaker_of("data/raw/calm/calm_0001.wav") == ""
+
+
+def test_split_is_by_speaker_and_leakage_is_detected():
+    from src.data_contracts import check_speaker_leakage
+
+    rows = []
+    for spk in range(30):
+        for i, label in enumerate(["calm", "stressed", "calm", "stressed"]):
+            rows.append({"sha256": f"h{spk}-{i}", "label": label, "speaker": f"cremad{1000 + spk}"})
+    assign_splits(rows, 0.2, 0.1, seed=1)
+    assert check_speaker_leakage(rows) == {}
+    assert {r["split"] for r in rows} == {"train", "val", "test"}
+    rows[0]["split"] = "test" if rows[0]["split"] != "test" else "train"
+    assert rows[0]["speaker"] in check_speaker_leakage(rows)

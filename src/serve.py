@@ -64,8 +64,9 @@ from pydantic import BaseModel, Field
 from src import __version__, bandits
 from src import rollout as ro
 from src.alerting import find_alert_segments
+from src.bundle import CallModel
 from src.config import PROJECT_ROOT, load_params
-from src.fake_model import FakeModel
+from src.fake_model import FakeTextModel, fake_call_model
 from src.preprocessing import AudioContractError, AudioSpec, FeatureExtractor, preprocess_call
 from src.telemetry import TelemetryStore, now_iso
 
@@ -93,10 +94,11 @@ ChallengerLoader = Callable[[], LoaderResult | None]
 @dataclass
 class Settings:
     model_source: str = "auto"
-    model_path: Path = PROJECT_ROOT / "models" / "champion.pt"
-    challenger_path: Path = PROJECT_ROOT / "models" / "challenger.pt"
+    model_path: Path = PROJECT_ROOT / "models" / "champion_bundle"
+    challenger_path: Path = PROJECT_ROOT / "models" / "challenger_bundle"
     mlflow_uri: str | None = None
-    model_name: str = "voice-stress-detector"
+    model_name: str = "covert-call-detector"
+    asr_model: str = "none"  # Whisper model name, or "none" (tests / no speech-to-text)
     telemetry_db: Path = PROJECT_ROOT / "telemetry" / "telemetry.db"
     load_delay_s: float = 0.0
     fake_scores: list[float] | None = None
@@ -116,10 +118,13 @@ class Settings:
 
         return cls(
             model_source=os.environ.get("MODEL_SOURCE", "auto").lower(),
-            model_path=Path(os.environ.get("MODEL_PATH", PROJECT_ROOT / "models/champion.pt")),
-            challenger_path=Path(
-                os.environ.get("CHALLENGER_PATH", PROJECT_ROOT / "models/challenger.pt")
+            model_path=Path(
+                os.environ.get("MODEL_PATH", PROJECT_ROOT / "models" / "champion_bundle")
             ),
+            challenger_path=Path(
+                os.environ.get("CHALLENGER_PATH", PROJECT_ROOT / "models" / "challenger_bundle")
+            ),
+            asr_model=os.environ.get("ASR_MODEL", "base.en"),
             mlflow_uri=os.environ.get("MLFLOW_TRACKING_URI"),
             model_name=os.environ.get("MODEL_NAME", p["mlflow"]["registered_model_name"]),
             telemetry_db=Path(
@@ -147,6 +152,9 @@ class ModelState:
     challenger_version: str | None = None
     error: str | None = None
     reloading: bool = False
+    asr: Any = None
+    asr_status: Literal["disabled", "loading", "ready", "failed"] = "disabled"
+    asr_name: str | None = None
     started_at: float = field(default_factory=time.time)
     ready_at: float | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -161,7 +169,7 @@ def _registry_version(settings: Settings, alias: str) -> str | None:
 
 def _load_alias(settings: Settings, alias: str) -> LoaderResult:
     from src import registry
-    from src.model import TorchStressPredictor
+    from src.bundle import load_bundle
 
     if not settings.mlflow_uri:
         raise RuntimeError("MLFLOW_TRACKING_URI is not set")
@@ -172,10 +180,8 @@ def _load_alias(settings: Settings, alias: str) -> LoaderResult:
             if version is None:
                 raise LookupError(f"no '{settings.model_name}@{alias}' in registry")
             with tempfile.TemporaryDirectory() as td:
-                ckpt = registry.download_checkpoint(
-                    settings.mlflow_uri, settings.model_name, alias, td
-                )
-                pred = TorchStressPredictor.from_checkpoint(ckpt, version=version)
+                path = registry.download_bundle(settings.mlflow_uri, settings.model_name, alias, td)
+                pred = load_bundle(path, version=version)
             return pred, "mlflow", version
         except LookupError:
             raise
@@ -187,13 +193,13 @@ def _load_alias(settings: Settings, alias: str) -> LoaderResult:
 
 
 def _load_file(path: Path, label: str) -> LoaderResult:
-    from src.model import TorchStressPredictor
+    from src.bundle import BUNDLE_FILE, load_bundle
 
-    if not path.exists():
-        raise FileNotFoundError(f"checkpoint not found: {path}")
-    mtime = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+    if not (path / BUNDLE_FILE).exists():
+        raise FileNotFoundError(f"bundle not found: {path}")
+    mtime = datetime.fromtimestamp((path / BUNDLE_FILE).stat().st_mtime, UTC)
     version = f"file:{path.name}@{mtime:%Y%m%dT%H%M%SZ}"
-    return TorchStressPredictor.from_checkpoint(path, version), "file", version
+    return load_bundle(path, version), "file", version
 
 
 def default_loader(settings: Settings) -> Loader:
@@ -205,7 +211,8 @@ def default_loader(settings: Settings) -> Loader:
             time.sleep(settings.load_delay_s)
         src = settings.model_source
         if src == "fake":
-            return FakeModel(settings.fake_scores, version="fake-champion"), "fake", "fake-champion"
+            fake = fake_call_model(settings.fake_scores, version="fake-champion")
+            return fake, "fake", "fake-champion"
         if src == "file":
             return _load_file(settings.model_path, "champion")
         if src == "mlflow":
@@ -229,12 +236,12 @@ def default_challenger_loader(settings: Settings) -> ChallengerLoader:
         if src == "fake":
             if settings.fake_challenger_scores is None:
                 return None
-            fake = FakeModel(settings.fake_challenger_scores, version="fake-challenger")
+            fake = fake_call_model(settings.fake_challenger_scores, version="fake-challenger")
             return fake, "fake", "fake-challenger"
         if src == "file":
             return (
                 _load_file(settings.challenger_path, "challenger")
-                if (settings.challenger_path.exists())
+                if (settings.challenger_path / "bundle.json").exists()
                 else None
             )
         try:
@@ -257,9 +264,15 @@ class WindowScore(BaseModel):
     index: int
     start_s: float
     end_s: float
-    duress_score: float = Field(ge=0.0, le=1.0)
+    duress_score: float = Field(ge=0.0, le=1.0)  # P(stressed voice) for this 2 s window
     above_threshold: bool
-    in_alert: bool
+    in_alert: bool  # part of a SUSTAINED stress run (>= K windows above theta)
+
+
+class ContentOut(BaseModel):
+    label: str
+    probs: dict[str, float]
+    evidence: list[str]
 
 
 class AlertSegmentOut(BaseModel):
@@ -278,14 +291,22 @@ class PredictionResponse(BaseModel):
     n_windows: int
     threshold: float
     consecutive_windows: int
-    alert: bool
-    alert_segments: list[AlertSegmentOut]
+    alert: bool  # combined decision: possible covert / under-threat call
+    threat_level: Literal["normal", "review", "alert"] = "normal"
+    threat_score: float = 0.0
+    reason: str = ""
+    transcript: str | None = None
+    transcript_source: Literal["asr", "provided", "unavailable"] = "unavailable"
+    content: ContentOut | None = None
+    stress_score: float = 0.0  # mean P(stressed voice) over the call
+    alert_segments: list[AlertSegmentOut]  # sustained voice-stress runs (information)
     max_score: float
     mean_score: float
     windows: list[WindowScore]
     model_version: str
     model_source: str
     latency_ms: float
+    asr_ms: float = 0.0
     served_by: str = "champion"
     rollout_mode: str = "champion_only"
 
@@ -298,6 +319,7 @@ class HealthResponse(BaseModel):
     rollout_mode: str | None = None
     error: str | None = None
     reloading: bool = False
+    asr: str | None = None
     uptime_s: float
     threshold: float
     consecutive_windows: int
@@ -306,7 +328,7 @@ class HealthResponse(BaseModel):
 
 class FeedbackIn(BaseModel):
     call_id: str
-    true_label: Literal["stressed", "calm"]
+    true_label: Literal["threat", "no_threat"]
 
 
 class RolloutIn(BaseModel):
@@ -324,6 +346,7 @@ def create_app(
     settings: Settings | None = None,
     challenger_loader: ChallengerLoader | None = None,
     params: dict[str, Any] | None = None,
+    transcriber: Any = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     injected = loader is not None
@@ -339,6 +362,32 @@ def create_app(
     rng = np.random.default_rng()
     rollout: dict[str, Any] = {"mode": "champion_only", "status": "idle", "experiment_id": None}
     eval_lock = asyncio.Lock()
+
+    def as_call_model(p: Any) -> CallModel:
+        """Bundles pass through; a bare voice model (tests) gets a keyword text stand-in."""
+        if hasattr(p, "decide"):
+            return p
+        return CallModel(p, FakeTextModel(), params["fusion"], getattr(p, "version", "?"))
+
+    def _load_asr() -> None:
+        if transcriber is not None:
+            state.asr, state.asr_status = transcriber, "ready"
+            state.asr_name = getattr(transcriber, "name", "custom")
+            return
+        if settings.asr_model.lower() == "none":
+            state.asr_status = "disabled"
+            return
+        state.asr_status = "loading"
+        try:
+            from src.asr import load_transcriber
+
+            state.asr = load_transcriber(settings.asr_model)
+            state.asr_name = state.asr.name
+            state.asr_status = "ready"
+            log.info("speech-to-text ready: %s", state.asr_name)
+        except Exception as exc:  # calls can still be scored with a typed transcript
+            log.exception("speech-to-text failed to load")
+            state.asr_status, state.asr_name = "failed", f"{settings.asr_model}: {exc}"
 
     # ------------------------------------------------------------ loading
     def _warmup(predictor: Predictor) -> None:
@@ -357,7 +406,10 @@ def create_app(
         @challenger is loaded afterwards so a slow or broken challenger can never delay
         or block the startup probe."""
         try:
+            if initial:
+                _load_asr()
             predictor, source, version = loader()
+            predictor = as_call_model(predictor)
             _warmup(predictor)
             with state.lock:
                 state.predictor, state.source, state.version = predictor, source, version
@@ -375,6 +427,7 @@ def create_app(
         try:
             chall = challenger_loader()
             if chall is not None:
+                chall = (as_call_model(chall[0]), *chall[1:])
                 _warmup(chall[0])
         except Exception as exc:  # a broken challenger must never affect the champion
             log.warning("challenger not loaded: %s", exc)
@@ -562,6 +615,7 @@ def create_app(
             rollout_mode=rollout.get("mode"),
             error=state.error,
             reloading=state.reloading,
+            asr=f"{state.asr_status}: {state.asr_name}" if state.asr_name else state.asr_status,
             uptime_s=round(time.time() - state.started_at, 2),
             threshold=settings.threshold,
             consecutive_windows=settings.consecutive_windows,
@@ -603,6 +657,11 @@ def create_app(
         background: BackgroundTasks,
         file: UploadFile = File(..., description="16 kHz mono WAV"),
         call_id: str | None = Form(None),
+        transcript: str | None = Form(
+            None,
+            description="Optional caller transcript. When omitted, the built-in "
+            "speech-to-text (Whisper) transcribes the audio.",
+        ),
     ):
         champion, challenger = state.predictor, state.challenger
         if state.status != "ready" or champion is None:
@@ -624,11 +683,31 @@ def create_app(
                 422, detail={"error": "audio_contract_violation", "message": str(exc)}
             ) from exc
 
+        # 1. what was said: provided transcript > speech-to-text > unavailable
+        asr_ms, source = 0.0, "unavailable"
+        if transcript and transcript.strip():
+            text, source = transcript.strip(), "provided"
+        elif state.asr is not None:
+            t_asr = time.perf_counter()
+            try:
+                text = await run_in_threadpool(
+                    state.asr.transcribe, feats["audio"], audio_spec.sample_rate
+                )
+                source = "asr"
+            except Exception:
+                log.exception("speech-to-text failed on %s", call_id)
+                text = None
+            asr_ms = (time.perf_counter() - t_asr) * 1000
+        else:
+            text = None
+
+        # 2. how it was said + the combined decision, by the routed model
         arm, propensity = await _route(call_id)
         error = 0
         served = champion if arm == "champion" or challenger is None else challenger
         try:
             scores, ms_per_window = await run_in_threadpool(_score, served, feats)
+            decision = served.decide(scores, text)
         except Exception:
             if served is champion:
                 raise
@@ -636,6 +715,7 @@ def create_app(
             log.exception("challenger failed on %s - falling back to champion", call_id)
             error = 1
             scores, ms_per_window = await run_in_threadpool(_score, champion, feats)
+            decision = champion.decide(scores, text)
             served = champion
         latency_ms = (time.perf_counter() - t0) * 1000
 
@@ -666,7 +746,18 @@ def create_app(
             n_windows=len(windows),
             threshold=settings.threshold,
             consecutive_windows=settings.consecutive_windows,
-            alert=bool(segments),
+            alert=decision["threat_level"] == "alert",
+            threat_level=decision["threat_level"],
+            threat_score=decision["threat_score"],
+            reason=decision["reason"],
+            transcript=text,
+            transcript_source=source,
+            content=ContentOut(
+                **{k: decision["content"][k] for k in ("label", "probs", "evidence")}
+            )
+            if decision["content"]
+            else None,
+            stress_score=decision["stress_score"],
             alert_segments=[
                 AlertSegmentOut(**{**s.to_dict(), "max_score": round(s.max_score, 5)})
                 for s in segments
@@ -677,6 +768,7 @@ def create_app(
             model_version=str(served.version),
             model_source=str(state.source),
             latency_ms=round(latency_ms, 2),
+            asr_ms=round(asr_ms, 1),
             served_by=arm,
             rollout_mode=rollout["mode"],
         )
@@ -691,16 +783,24 @@ def create_app(
             "client": request.client.host if request.client else None,
         }
         shadow = challenger if rollout["mode"] == "shadow" and challenger is not None else None
-        background.add_task(_after_call, resp, meta, shadow, feats)
+        background.add_task(_after_call, resp, meta, shadow, feats, text)
         return resp
 
     async def _after_call(
-        resp: PredictionResponse, meta: dict, shadow: Predictor | None, feats: dict
+        resp: PredictionResponse,
+        meta: dict,
+        shadow: Predictor | None,
+        feats: dict,
+        text: str | None = None,
     ) -> None:
         """Background: audit row, then shadow scoring, then automatic canary analysis."""
         try:
             call: dict[str, Any] = resp.model_dump(exclude={"windows", "alert_segments"})
             call.update(n_alert_segments=len(resp.alert_segments), **meta)
+            call.update(
+                content_label=resp.content.label if resp.content else None,
+                p_covert=resp.content.probs.get("covert") if resp.content else None,
+            )
             await store.log_call(call, [w.model_dump() for w in resp.windows])
         except Exception:
             log.exception("telemetry write failed for %s", resp.call_id)
@@ -708,20 +808,12 @@ def create_app(
         if shadow is not None:
             try:
                 s_scores, s_ms = await run_in_threadpool(_score, shadow, feats)
-                s_alert = bool(
-                    find_alert_segments(
-                        s_scores,
-                        feats["starts"],
-                        feats["ends"],
-                        settings.threshold,
-                        settings.consecutive_windows,
-                    )
-                )
+                s_decision = shadow.decide(s_scores, text)
                 await store.update_call(
                     resp.call_id,
                     shadow_version=shadow.version,
-                    shadow_alert=int(s_alert),
-                    shadow_max_score=float(s_scores.max()),
+                    shadow_alert=int(s_decision["threat_level"] == "alert"),
+                    shadow_max_score=float(s_decision["threat_score"]),
                     shadow_ms_per_window=round(s_ms, 3),
                     shadow_error=0,
                 )
@@ -748,7 +840,7 @@ def create_app(
             await asyncio.sleep(0.1)
         if call is None:
             raise HTTPException(404, detail="unknown call_id")
-        truth = body.true_label == "stressed"
+        truth = body.true_label == "threat"
         fields: dict[str, Any] = {
             "true_label": body.true_label,
             "correct": int(bool(call["alert"]) == truth),

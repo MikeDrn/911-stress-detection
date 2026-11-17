@@ -1,27 +1,32 @@
-"""MLflow pyfunc wrapper so registered models are self-describing and portable.
+"""MLflow pyfunc wrapper so registered bundles are self-describing and portable.
 
-The registry entry contains the raw checkpoint (``artifacts/model.pt``), the
-``src`` package (``code_paths``) and pinned requirements, so any MLflow
-consumer can ``mlflow.pyfunc.load_model("models:/voice-stress-detector@champion")``
-and call ``predict`` on a batch of Log-Mel / MFCC tensors.
+The registry entry contains the bundle folder (voice model + transcript model +
+fusion parameters), the ``src`` package (``code_paths``) and pinned requirements.
+Any MLflow consumer can do::
 
-The FastAPI service does *not* go through pyfunc: it downloads the same
-checkpoint and builds a ``TorchStressPredictor`` directly, which keeps the API
-image free of pyfunc's environment machinery.
+    m = mlflow.pyfunc.load_model("models:/covert-call-detector@champion")
+    m.predict(pandas.DataFrame({"transcript": [...], "stress": [...]}))
+
+and get the fused threat decision for each row. The FastAPI service downloads the
+same bundle and runs the full audio path (windows, voice model, speech-to-text).
 """
 
 from __future__ import annotations
 
 import mlflow.pyfunc
-import numpy as np
 
 
-class StressPyfunc(mlflow.pyfunc.PythonModel):
+class CallPyfunc(mlflow.pyfunc.PythonModel):
     def load_context(self, context):
-        from src.model import TorchStressPredictor
+        from src.bundle import load_bundle
 
-        self.predictor = TorchStressPredictor.from_checkpoint(context.artifacts["checkpoint"])
+        self.model = load_bundle(context.artifacts["bundle"])
 
     def predict(self, context, model_input, params=None):
-        x = np.asarray(model_input, dtype=np.float32)
-        return self.predictor.predict_proba({self.predictor.input_key: x})
+        import numpy as np
+
+        rows = model_input.to_dict("records")
+        return [
+            self.model.decide(np.array([float(r.get("stress", 0.0))]), r.get("transcript", ""))
+            for r in rows
+        ]

@@ -33,7 +33,7 @@ def test_valid_wav_loads_as_float32_mono(make_wav):
         ({"sr": 44100}, "Sample rate 44100"),
         ({"sr": 8000}, "Sample rate 8000"),
         ({"channels": 2}, "2 channels"),
-        ({"seconds": 1.0}, "at least 2.0s"),
+        ({"seconds": 0.5}, "at least 1.0s"),
         ({"fmt": "FLAC", "subtype": "PCM_16"}, "expected WAV"),
     ],
 )
@@ -57,6 +57,13 @@ def test_sliding_window_count(seconds, expected):
     windows, starts = sliding_windows(y, SPEC)
     assert windows.shape == (expected, 32000)
     np.testing.assert_allclose(starts, np.arange(expected) * 0.5)
+
+
+def test_short_clip_is_zero_padded_to_one_window():
+    y = np.ones(int(1.4 * 16000), dtype=np.float32)
+    windows, starts = sliding_windows(y, SPEC)
+    assert windows.shape == (1, 32000) and starts.tolist() == [0.0]
+    assert windows[0, :22400].min() == 1.0 and windows[0, 22400:].max() == 0.0
 
 
 def test_windows_overlap_exactly_by_hop():

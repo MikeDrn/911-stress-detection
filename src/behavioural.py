@@ -1,104 +1,181 @@
-"""Behavioural model tests (Course 7, slide 12 - inspired by CheckList).
+"""Behavioural tests for the call model (Course 7, slide 12 - inspired by CheckList).
 
-One global accuracy hides failures, so the quality gate also checks *what the
-model must do*, on freshly synthesised clips with controlled properties:
+One global accuracy hides failures, so the gate also checks *what the system must do*:
 
-* Minimum functionality - obvious, clean-line calls must be classified correctly.
-* Invariance            - changes that must not change the answer: louder /
-                          quieter voice (x0.5, x1.5 gain) and light background
-                          noise (30 dB SNR).
-* Slices                - accuracy and stressed-recall floors for every slice
-                          (speaker sex x telephone channel). A model can gain a
-                          point overall while one slice collapses.
+Content (transcript model)
+  min_functionality  obvious canonical calls must be classified correctly, including
+                     the traps: "my son is choking on pizza" is a genuine emergency,
+                     "sorry, wrong number, I wanted the pizza place" is not a threat.
+  invariance         changing the address, a name, the food or the topping, or adding
+                     speech-to-text noise, must not change the class.
 
-Floors are *enforced* only for channels the training data covers. A slice the
-dataset does not cover yet (e.g. phone lines before any phone data exists) is
-still measured and reported as a coverage-gap WARNING: the gate cannot demand
-what the data never showed the model, but the team must see the risk.
+Fusion (the 911 rule)
+  directional        a genuine emergency must NOT alert even with a maximally stressed
+                     voice; a covert-looking call must alert even with a calm voice.
 
-Decisions are made per 2-second window at p >= 0.5, like the offline gate.
+Voice (acoustic model) - slices
+  accuracy / stressed-recall floors per speaker sex x telephone channel, on real
+  held-out speakers. Floors are enforced only for channels the training data covers;
+  an uncovered channel is measured and reported as a coverage-gap WARNING.
 """
 
 from __future__ import annotations
 
+import csv
+import random
+import re
 from itertools import product
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from src.preprocessing import AudioSpec, FeatureExtractor, sliding_windows
-from src.synthetic import synth_utterance
+from src.fusion import fuse
+from src.transcripts import SLOTS, asr_noise
 
-SLICES = list(product(("female", "male"), ("clean", "phone")))
+CANONICAL = [
+    ("hi i'd like to order a large pizza with pepperoni to 61 elm street please hurry", "covert"),
+    ("yes yes with pepperoni please hurry", "covert"),
+    ("hi mom yeah everything is fine can you come over to 88 oak avenue right now", "covert"),
+    ("my husband collapsed and he is not breathing please send an ambulance", "genuine_emergency"),
+    ("someone is dead in front of me please come quickly", "genuine_emergency"),
+    ("my son is choking on a piece of pizza he can't breathe", "genuine_emergency"),
+    ("there's a fire in my kitchen and the smoke is everywhere", "genuine_emergency"),
+    ("sorry wrong number i was trying to call the pizza place bye", "non_emergency"),
+    ("what time does the post office open on saturday", "non_emergency"),
+    ("my neighbors are playing loud music and i can't sleep", "non_emergency"),
+]
 
-
-def make_slice_set(clips_per_slice: int, seed: int = 4242, sr: int = 16000) -> list[dict]:
-    rng = np.random.default_rng(seed)
-    clips = []
-    for (sex, channel), label in product(SLICES, ("calm", "stressed")):
-        for _ in range(clips_per_slice):
-            y = synth_utterance(
-                3.0, label == "stressed", rng, sr, female=sex == "female", channel=channel
-            )
-            clips.append({"y": y, "label": label, "sex": sex, "channel": channel})
-    return clips
-
-
-def _decisions(predictor, extractor: FeatureExtractor, spec: AudioSpec, y: np.ndarray):
-    windows, _ = sliding_windows(y.astype(np.float32), spec)
-    return predictor.predict_proba(extractor.transform(windows)) >= 0.5
+_SWAP_KEYS = ("addr", "name", "food", "topping", "road", "office", "business", "color")
 
 
-def run_behavioural_tests(
-    predictor,
-    cfg: dict[str, Any],
-    spec: AudioSpec | None = None,
-    seed: int = 4242,
-    enforced_channels: set[str] | None = None,
-) -> dict[str, dict[str, Any]]:
-    spec = spec or AudioSpec()
-    extractor = FeatureExtractor(spec)
-    clips = make_slice_set(int(cfg["clips_per_slice"]), seed, spec.sample_rate)
-    rng = np.random.default_rng(seed + 1)
-    for c in clips:
-        c["pred"] = _decisions(predictor, extractor, spec, c["y"])
-        c["truth"] = c["label"] == "stressed"
+def perturb(text: str, rng: random.Random) -> str:
+    """Swap every known slot value for another one, then add speech-to-text noise."""
+    out = text
+    for key in _SWAP_KEYS:
+        for value in sorted(SLOTS[key], key=len, reverse=True):
+            if value in out:
+                out = out.replace(value, rng.choice([v for v in SLOTS[key] if v != value]))
+    return asr_noise(out, rng, strength=0.5)
 
+
+def content_checks(text_model, test_rows: list[dict], cfg: dict, seed: int = 7) -> dict:
     checks: dict[str, dict[str, Any]] = {}
-
-    clean = [c for c in clips if c["channel"] == "clean"]
-    acc = float(np.mean(np.concatenate([c["pred"] == c["truth"] for c in clean])))
-    checks["min_functionality_clean_calls"] = {
+    preds = [text_model.predict(t)["label"] for t, _ in CANONICAL]
+    misses = [t for (t, y), p in zip(CANONICAL, preds, strict=True) if p != y]
+    acc = 1 - len(misses) / len(CANONICAL)
+    checks["content_min_functionality"] = {
         "passed": acc >= float(cfg["min_functionality_accuracy"]),
         "accuracy": acc,
         "required": float(cfg["min_functionality_accuracy"]),
+        "missed": misses,
     }
-
-    agree = []
-    for c in clean:
-        noise_pow = np.mean(c["y"] ** 2) / 10 ** (30 / 10)
-        for variant in (
-            c["y"] * 0.5,
-            np.clip(c["y"] * 1.5, -1, 1),
-            c["y"] + rng.normal(0, np.sqrt(noise_pow), len(c["y"])),
-        ):
-            agree.append(_decisions(predictor, extractor, spec, variant) == c["pred"])
-    agreement = float(np.mean(np.concatenate(agree)))
-    checks["invariance_gain_and_noise"] = {
-        "passed": agreement >= float(cfg["invariance_min_agreement"]),
-        "agreement": agreement,
+    rng = random.Random(seed)
+    sample = rng.sample(test_rows, min(150, len(test_rows)))
+    agree = [
+        text_model.predict(r["text"])["label"]
+        == text_model.predict(perturb(r["text"], rng))["label"]
+        for r in sample
+    ]
+    checks["content_invariance_slots_and_asr_noise"] = {
+        "passed": float(np.mean(agree)) >= float(cfg["invariance_min_agreement"]),
+        "agreement": float(np.mean(agree)),
         "required": float(cfg["invariance_min_agreement"]),
     }
+    return checks
 
-    enforced_channels = set(enforced_channels or {ch for _, ch in SLICES})
+
+def directional_checks(text_model, test_rows: list[dict], fusion_cfg: dict, cfg: dict) -> dict:
+    genuine = [r for r in test_rows if r["label"] == "genuine_emergency"]
+    covert = [r for r in test_rows if r["label"] == "covert"]
+    g_alert = (
+        np.mean(
+            [
+                fuse(text_model.predict(r["text"]), 1.0, fusion_cfg)["threat_level"] == "alert"
+                for r in genuine
+            ]
+        )
+        if genuine
+        else 0.0
+    )
+    c_alert = (
+        np.mean(
+            [
+                fuse(text_model.predict(r["text"]), 0.0, fusion_cfg)["threat_level"] == "alert"
+                for r in covert
+            ]
+        )
+        if covert
+        else 1.0
+    )
+    return {
+        "directional_genuine_emergency_max_stress_no_alert": {
+            "passed": float(g_alert) <= float(cfg["directional_max_genuine_alert"]),
+            "alert_rate": float(g_alert),
+            "maximum": float(cfg["directional_max_genuine_alert"]),
+        },
+        "directional_covert_calm_voice_still_alerts": {
+            "passed": float(c_alert) >= float(cfg["directional_min_covert_alert"]),
+            "alert_rate": float(c_alert),
+            "minimum": float(cfg["directional_min_covert_alert"]),
+        },
+    }
+
+
+def read_speakers(raw_dir: Path) -> dict[str, str]:
+    path = raw_dir / "speakers.csv"
+    if not path.exists():
+        return {}
+    with open(path, newline="", encoding="utf-8") as fh:
+        return {r["speaker"]: r["sex"] for r in csv.DictReader(fh)}
+
+
+def voice_slice_checks(
+    acoustic,
+    manifest_rows: list[dict],
+    root: Path,
+    raw_dir: Path,
+    cfg: dict,
+    enforced_channels: set[str],
+    seed: int = 11,
+) -> dict:
+    """Window accuracy / stressed recall per (sex x channel) on held-out test speakers."""
+    import soundfile as sf
+
+    from src.augment import phone_line, seed_for
+    from src.preprocessing import AudioSpec, FeatureExtractor, sliding_windows
+
+    spec = AudioSpec()
+    fx = FeatureExtractor(spec)
+    sexes = read_speakers(raw_dir)
+    rows = [
+        r
+        for r in manifest_rows
+        if r["split"] == "test"
+        and r.get("speaker")
+        and not Path(r["path"]).name.startswith("phone_")
+        and r["speaker"] in sexes
+    ]
+    rng = random.Random(seed)
     per_slice, ok, gaps = {}, True, []
-    for sex, channel in SLICES:
-        rows = [c for c in clips if c["sex"] == sex and c["channel"] == channel]
-        preds = np.concatenate([c["pred"] for c in rows])
-        truth = np.concatenate([np.full(len(c["pred"]), c["truth"]) for c in rows])
-        s_acc = float(np.mean(preds == truth))
-        s_rec = float(np.mean(preds[truth])) if truth.any() else 0.0
-        meets = s_acc >= float(cfg["slice_min_accuracy"]) and s_rec >= float(
+    for sex, channel in product(("female", "male"), ("clean", "phone")):
+        pool = [r for r in rows if sexes[r["speaker"]] == sex]
+        pick = rng.sample(pool, min(int(cfg["clips_per_slice"]), len(pool)))
+        if not pick:
+            continue
+        preds, truth = [], []
+        for r in pick:
+            y, _ = sf.read(root / r["path"], dtype="float32")
+            if channel == "phone":
+                y = phone_line(y, np.random.default_rng(seed_for(Path(r["path"]).name)))
+            w, _ = sliding_windows(y, spec)
+            p = acoustic.predict_proba(fx.transform(w)) >= 0.5
+            preds.append(p)
+            truth.append(np.full(len(p), r["label"] == "stressed"))
+        p, t = np.concatenate(preds), np.concatenate(truth)
+        acc = float(np.mean(p == t))
+        rec = float(np.mean(p[t])) if t.any() else 0.0
+        meets = acc >= float(cfg["slice_min_accuracy"]) and rec >= float(
             cfg["slice_min_recall_stressed"]
         )
         enforced = channel in enforced_channels
@@ -107,17 +184,23 @@ def run_behavioural_tests(
         elif not meets:
             gaps.append(f"{sex}/{channel}")
         per_slice[f"{sex}/{channel}"] = {
-            "accuracy": s_acc,
-            "recall_stressed": s_rec,
+            "accuracy": acc,
+            "recall_stressed": rec,
             "passed": meets,
             "enforced": enforced,
+            "clips": len(pick),
         }
-    checks["slice_floors_sex_x_channel"] = {
-        "passed": ok,
-        "slices": per_slice,
-        "enforced_channels": sorted(enforced_channels),
-        "coverage_gap_warnings": gaps,
-        "required_accuracy": float(cfg["slice_min_accuracy"]),
-        "required_recall_stressed": float(cfg["slice_min_recall_stressed"]),
+    return {
+        "voice_slice_floors_sex_x_channel": {
+            "passed": ok,
+            "slices": per_slice,
+            "enforced_channels": sorted(enforced_channels),
+            "coverage_gap_warnings": gaps,
+            "required_accuracy": float(cfg["slice_min_accuracy"]),
+            "required_recall_stressed": float(cfg["slice_min_recall_stressed"]),
+        }
     }
-    return checks
+
+
+def label_of(text: str) -> str:  # tiny helper for tests
+    return re.sub(r"\s+", " ", text).strip()

@@ -53,5 +53,20 @@ def download_checkpoint(tracking_uri: str, model_name: str, alias: str, dst: str
     return matches[0]
 
 
+def download_bundle(tracking_uri: str, model_name: str, alias: str, dst: str | Path) -> Path:
+    """Download the registered bundle behind ``alias``; returns the folder with bundle.json."""
+    import mlflow
+
+    from src.bundle import find_bundle_dir
+
+    client(tracking_uri)
+    dst = Path(dst)
+    dst.mkdir(parents=True, exist_ok=True)
+    local = mlflow.artifacts.download_artifacts(
+        artifact_uri=f"models:/{model_name}@{alias}", dst_path=str(dst)
+    )
+    return find_bundle_dir(local)
+
+
 def set_alias(tracking_uri: str, model_name: str, alias: str, version: str | int) -> None:
     client(tracking_uri).set_registered_model_alias(model_name, alias, str(version))

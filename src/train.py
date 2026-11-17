@@ -1,19 +1,17 @@
-"""DVC ``train`` stage: fit a ResNet-18 on spectrogram windows and register it.
+"""DVC ``train_acoustic`` stage: fit the ResNet-18 voice-stress model.
 
-Every run is recorded in MLflow:
+Reads the windowed Log-Mel features, trains on real speech (CREMA-D: neutral vs
+fear), keeps the best epoch on the speaker-disjoint validation set and writes
 
-* params   - audio/feature/training hyper-parameters (flattened params.yaml)
-* metrics  - per-epoch train/val loss, accuracy and stressed-class recall
-* tags     - git commit, DVC data hash, architecture, parameter count
-* model    - pyfunc model (checkpoint + src code) registered as a new version
-             of ``voice-stress-detector`` and tagged with alias ``@challenger``
+* models/acoustic.pt               - weights + config (no pickled code)
+* reports/acoustic_metrics.json    - best-epoch validation metrics (DVC metrics)
+* reports/acoustic_history.json    - per-epoch curves (logged to MLflow by ``package``)
 
-The challenger is *never* promoted here; promotion is the quality gate's job.
+Registration happens in the ``package`` stage, which ships this model together
+with the transcript model as one bundle.
 
-Usage::
-
-    python -m src.train               # log to $MLFLOW_TRACKING_URI / params.yaml
-    python -m src.train --no-mlflow   # offline: only writes models/challenger.pt
+    python -m src.train                # params.yaml epochs
+    python -m src.train --epochs 1     # quick smoke run
 """
 
 from __future__ import annotations
@@ -31,11 +29,11 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from src.config import PROJECT_ROOT, load_params, tracking_uri
+from src.config import PROJECT_ROOT, load_params
 from src.features import load_split
 from src.model import INPUT_KEY, count_parameters, create_model, save_checkpoint
 
-CHALLENGER_PATH = PROJECT_ROOT / "models" / "challenger.pt"
+ACOUSTIC_PATH = PROJECT_ROOT / "models" / "acoustic.pt"
 
 
 def set_seed(seed: int) -> None:
@@ -97,7 +95,7 @@ def evaluate(model: nn.Module, loader: DataLoader, loss_fn) -> dict[str, float]:
     }
 
 
-def train(params: dict[str, Any], use_mlflow: bool = True, epochs: int | None = None) -> dict:
+def train(params: dict[str, Any], epochs: int | None = None) -> dict:
     tp = params["train"]
     arch = tp["architecture"]
     key = INPUT_KEY[arch]
@@ -132,27 +130,6 @@ def train(params: dict[str, Any], use_mlflow: bool = True, epochs: int | None = 
         "hop_seconds": float(params["audio"]["hop_seconds"]),
     }
 
-    run = None
-    if use_mlflow:
-        import mlflow
-
-        from src import registry  # noqa: F401  (silences MLflow agent hints)
-
-        mlflow.set_tracking_uri(tracking_uri(params))
-        mlflow.set_experiment(params["mlflow"]["experiment_name"])
-        run = mlflow.start_run(run_name=f"{arch}-{time.strftime('%Y%m%d-%H%M%S')}")
-        mlflow.log_params(flatten({k: params[k] for k in ("audio", "features", "train")}))
-        mlflow.set_tags(
-            {
-                "git_commit": git_commit(),
-                "dvc_data_md5": dvc_data_hash(),
-                "architecture": arch,
-                "n_parameters": count_parameters(model),
-                "train_windows": len(train_ds),
-                "val_windows": len(val_ds),
-            }
-        )
-
     best = {"val_accuracy": -1.0, "val_loss": float("inf")}
     best_state = None
     history = []
@@ -184,10 +161,6 @@ def train(params: dict[str, Any], use_mlflow: bool = True, epochs: int | None = 
             f"[train] epoch {epoch:02d}/{epochs} "
             + " ".join(f"{k}={v:.4f}" for k, v in row.items())
         )
-        if run is not None:
-            import mlflow
-
-            mlflow.log_metrics(row, step=epoch)
         better = val["accuracy"] > best["val_accuracy"] or (
             val["accuracy"] == best["val_accuracy"] and val["loss"] < best["val_loss"]
         )
@@ -201,7 +174,7 @@ def train(params: dict[str, Any], use_mlflow: bool = True, epochs: int | None = 
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
 
     model.load_state_dict(best_state)
-    save_checkpoint(model, CHALLENGER_PATH, ckpt_config)
+    save_checkpoint(model, ACOUSTIC_PATH, ckpt_config)
     result: dict[str, Any] = {
         "best_epoch": best["epoch"],
         "best_val_accuracy": best["val_accuracy"],
@@ -211,64 +184,22 @@ def train(params: dict[str, Any], use_mlflow: bool = True, epochs: int | None = 
         "n_parameters": count_parameters(model),
     }
 
-    run_info: dict[str, Any] = {"mlflow": False}
-    if run is not None:
-        run_info = _log_and_register(params, result, run.info.run_id)
     (PROJECT_ROOT / "reports").mkdir(exist_ok=True)
-    (PROJECT_ROOT / "reports" / "train_metrics.json").write_text(json.dumps(result, indent=2))
-    (PROJECT_ROOT / "reports" / "train_run.json").write_text(json.dumps(run_info, indent=2))
+    (PROJECT_ROOT / "reports" / "acoustic_metrics.json").write_text(json.dumps(result, indent=2))
+    (PROJECT_ROOT / "reports" / "acoustic_history.json").write_text(json.dumps(history, indent=2))
     print(
-        f"[train] best epoch {best['epoch']} val_acc={best['val_accuracy']:.4f} -> "
-        f"{CHALLENGER_PATH.relative_to(PROJECT_ROOT)}"
+        f"[train] best epoch {best['epoch']} val_acc={best['val_accuracy']:.4f} "
+        f"val_recall_stressed={best['val_recall_stressed']:.4f} -> "
+        f"{ACOUSTIC_PATH.relative_to(PROJECT_ROOT)}"
     )
-    return {**result, **run_info}
-
-
-def _log_and_register(params: dict, result: dict, run_id: str) -> dict:
-    import mlflow
-
-    from src import registry
-    from src.mlflow_model import StressPyfunc
-
-    model_name = params["mlflow"]["registered_model_name"]
-    mlflow.log_metrics({k: v for k, v in result.items() if isinstance(v, int | float)})
-    mlflow.log_artifact(str(PROJECT_ROOT / "params.yaml"))
-    manifest = PROJECT_ROOT / params["data"]["manifest"]
-    if manifest.exists():
-        mlflow.log_artifact(str(manifest), artifact_path="data")
-
-    mlflow.pyfunc.log_model(
-        name="model",
-        python_model=StressPyfunc(),
-        artifacts={"checkpoint": str(CHALLENGER_PATH)},
-        code_paths=[str(PROJECT_ROOT / "src")],
-        pip_requirements=[
-            "torch",
-            "torchvision",
-            "numpy",
-            "librosa",
-            "soundfile",
-            "pyyaml",
-            "pydantic",
-        ],
-        registered_model_name=model_name,
-    )
-    mlflow.end_run()
-
-    c = registry.client(mlflow.get_tracking_uri())
-    versions = c.search_model_versions(f"name='{model_name}' and run_id='{run_id}'")
-    version = max(int(v.version) for v in versions)
-    registry.set_alias(mlflow.get_tracking_uri(), model_name, registry.CHALLENGER, version)
-    print(f"[train] registered {model_name} v{version} -> alias @{registry.CHALLENGER}")
-    return {"mlflow": True, "run_id": run_id, "model_name": model_name, "version": version}
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Train the voice-stress ResNet-18")
-    ap.add_argument("--no-mlflow", action="store_true", help="skip MLflow logging/registry")
     ap.add_argument("--epochs", type=int, default=None, help="override params.yaml train.epochs")
     args = ap.parse_args(argv)
-    train(load_params(), use_mlflow=not args.no_mlflow, epochs=args.epochs)
+    train(load_params(), epochs=args.epochs)
     return 0
 
 

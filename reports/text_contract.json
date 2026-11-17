@@ -1,0 +1,44 @@
+{
+  "passed": true,
+  "checks": {
+    "schema_text_and_label": {
+      "passed": true,
+      "n_rows": 1920,
+      "bad_rows": []
+    },
+    "no_family_leakage": {
+      "passed": true,
+      "leaked_families": {}
+    },
+    "no_duplicate_text_across_splits": {
+      "passed": true,
+      "examples": []
+    },
+    "class_coverage_and_floor": {
+      "passed": true,
+      "floor": 0.2,
+      "overall": {
+        "genuine_emergency": 0.4375,
+        "non_emergency": 0.28125,
+        "covert": 0.28125
+      },
+      "classes_per_split": {
+        "train": [
+          "covert",
+          "genuine_emergency",
+          "non_emergency"
+        ],
+        "val": [
+          "covert",
+          "genuine_emergency",
+          "non_emergency"
+        ],
+        "test": [
+          "covert",
+          "genuine_emergency",
+          "non_emergency"
+        ]
+      }
+    }
+  }
+}

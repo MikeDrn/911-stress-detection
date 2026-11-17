@@ -141,7 +141,7 @@ def test_shadow_report_recomputes_correctness_from_labels():
         {
             "alert": 1,
             "shadow_alert": 0,
-            "true_label": "calm",
+            "true_label": "no_threat",
             "model_ms_per_window": 10,
             "shadow_ms_per_window": 11,
             "shadow_error": 0,
@@ -149,7 +149,7 @@ def test_shadow_report_recomputes_correctness_from_labels():
         {
             "alert": 1,
             "shadow_alert": 1,
-            "true_label": "stressed",
+            "true_label": "threat",
             "model_ms_per_window": 10,
             "shadow_ms_per_window": 11,
             "shadow_error": 0,

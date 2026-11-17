@@ -42,34 +42,36 @@ jobs:
       - name: ruff format --check
         run: uvx ruff format --check .
 
-  # 2. Data contracts on a freshly generated dataset (format, SHA-256 leakage, class floors).
+  # 2. Data contracts on REAL data: a 6-actor slice of CREMA-D (~150 clips) and the
+  #    transcript dataset. Speaker leakage, SHA-256 leakage, format, class floors,
+  #    family leakage - the same checks `dvc repro` runs on the full data.
   data-contracts:
     name: Data contract checks
     runs-on: ubuntu-latest
+    env:
+      DEPS: --no-project --with numpy --with scipy --with soundfile --with pyyaml --with pydantic
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.11"
-      - name: Generate small synthetic dataset (clean + phone-line calls)
+      - name: Download a small real-voice slice (6 actors)
+        run: uv run $DEPS python -m scripts.download_cremad --actors 6
+      - name: Audio manifest (split by speaker) + contracts
         run: |
-          uv run --no-project --with numpy --with scipy --with soundfile --with pyyaml --with pydantic \
-            python -m scripts.generate_synthetic_data --clips-per-class 12
-          uv run --no-project --with numpy --with scipy --with soundfile --with pyyaml --with pydantic \
-            python -m scripts.generate_synthetic_data --clips-per-class 6 --channel phone
-      - name: Build split manifest
-        run: >
-          uv run --no-project --with numpy --with soundfile --with pyyaml --with pydantic
-          python -m src.data_contracts prepare
-      - name: Validate data contracts (fails the build on violation)
-        run: >
-          uv run --no-project --with numpy --with soundfile --with pyyaml --with pydantic
-          python -m src.data_contracts validate
+          uv run $DEPS python -m src.data_contracts prepare
+          uv run $DEPS python -m src.data_contracts validate
+      - name: Transcript dataset + text contracts
+        run: |
+          uv run $DEPS python -m src.transcripts
+          uv run $DEPS python -m src.text_contracts
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: data-contract-report
-          path: reports/data_contract.json
+          name: data-contract-reports
+          path: |
+            reports/data_contract.json
+            reports/text_contract.json
 
   # 3. Unit + FakeModel integration tests: no GPU, no weights, no MLflow server.
   test:
@@ -127,7 +129,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - name: Build images (tag = commit SHA, never :latest)
         run: docker compose build
-      - name: Boot the stack with FakeModels and wait for healthchecks
+      - name: Boot the stack with FakeModels (+ the baked Whisper) and wait for healthchecks
         env:
           MODEL_SOURCE: fake
           FAKE_CHALLENGER_SCORES: "0.1,0.2"
@@ -142,6 +144,7 @@ jobs:
           curl -fsS http://127.0.0.1:8501/_stcore/health
           curl -fsS http://127.0.0.1:5000/health
           curl -fsS -X POST http://127.0.0.1:8000/rollout -H 'Content-Type: application/json' -d '{"mode":"shadow"}'
+          curl -fsS http://127.0.0.1:8000/health | grep -q '"asr":"ready'
           docker compose exec -T dispatcher-ui python -c "import urllib.request; print(urllib.request.urlopen('http://stress-api:8000/health').read())"
       - name: Logs on failure
         if: failure()

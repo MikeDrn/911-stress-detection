@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # ---------------------------------------------------------------------------
 # One Dockerfile, three slim images (multi-stage targets):
-#   --target api     -> stress-api     (FastAPI + PyTorch CPU + librosa)
+#   --target api     -> stress-api     (FastAPI + PyTorch CPU + librosa + Whisper speech-to-text)
 #   --target ui      -> dispatcher-ui  (Streamlit only; no torch)
 #   --target mlflow  -> mlflow-server  (MLflow tracking server + registry)
 # Each target installs ONLY the uv extras it needs, so a UI change never
@@ -30,7 +30,15 @@ COPY pyproject.toml README.md uv.loc[k] ./
 # ----------------------------- stress-api ----------------------------------
 FROM base AS api-deps
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev --no-install-project --extra ml --extra api --extra tracking
+    uv sync --no-dev --no-install-project --extra ml --extra api --extra tracking --extra asr
+# Bake the speech-to-text weights into the image (Course 6: "bake or pull?"): the
+# container then never needs the internet at runtime, and the model version is
+# pinned by the image tag (code release train).
+ARG ASR_MODEL=base.en
+ENV ASR_MODEL=${ASR_MODEL} \
+    ASR_CACHE_DIR=/app/asr-models
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('${ASR_MODEL}', device='cpu', compute_type='int8', download_root='/app/asr-models')" \
+ && chmod -R a+rX /app/asr-models
 
 FROM api-deps AS api
 COPY params.yaml ./

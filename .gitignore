@@ -11,6 +11,9 @@ __pycache__/
 /data/manifests
 /data/demo
 /models/*.pt
+/models/champion_bundle
+/models/challenger_bundle
+/data/text
 /telemetry/
 /mlruns/
 mlflow.db

@@ -5,17 +5,17 @@ stages:
     deps:
     - path: data/raw
       hash: md5
-      md5: 4fec2eb0c5fbdaa37f023102e29580c2.dir
-      size: 23206352
-      nfiles: 160
+      md5: f9cbddf74810af46141cf5e9bc36ebff.dir
+      size: 373674535
+      nfiles: 4717
     - path: src/data_contracts.py
       hash: md5
-      md5: 2501e270893e8a52aa7e4d91edad3436
-      size: 10330
+      md5: ab60d05c44707788fa7e2de3148b47c0
+      size: 12099
     - path: src/preprocessing.py
       hash: md5
-      md5: 9601272eea66574da1f77939795f81ab
-      size: 9032
+      md5: bfc874a61e3ccc07061b6ec73c2f25ca
+      size: 9226
     params:
       params.yaml:
         data.classes:
@@ -27,24 +27,24 @@ stages:
     outs:
     - path: data/manifests/manifest.csv
       hash: md5
-      md5: 650ce56bceffb036d6c633d78f092926
-      size: 20474
+      md5: ebee83187e0a755a19be6cff8909317f
+      size: 720971
   validate:
     cmd: python -m src.data_contracts validate
     deps:
     - path: data/manifests/manifest.csv
       hash: md5
-      md5: 650ce56bceffb036d6c633d78f092926
-      size: 20474
+      md5: ebee83187e0a755a19be6cff8909317f
+      size: 720971
     - path: data/raw
       hash: md5
-      md5: 4fec2eb0c5fbdaa37f023102e29580c2.dir
-      size: 23206352
-      nfiles: 160
+      md5: f9cbddf74810af46141cf5e9bc36ebff.dir
+      size: 373674535
+      nfiles: 4717
     - path: src/data_contracts.py
       hash: md5
-      md5: 2501e270893e8a52aa7e4d91edad3436
-      size: 10330
+      md5: ab60d05c44707788fa7e2de3148b47c0
+      size: 12099
     params:
       params.yaml:
         audio:
@@ -52,33 +52,33 @@ stages:
           channels: 1
           window_seconds: 2.0
           hop_seconds: 0.5
-          min_duration_seconds: 2.0
+          min_duration_seconds: 1.0
           max_duration_seconds: 600
         data.min_class_ratio: 0.3
     outs:
     - path: reports/data_contract.json
       hash: md5
-      md5: ae2ba4523a90eb9ef5917055d2e56111
-      size: 1072
+      md5: 10c28da3b4bc8b294e37ae6f36e60df4
+      size: 1309
   featurize:
     cmd: python -m src.features
     deps:
     - path: data/manifests/manifest.csv
       hash: md5
-      md5: 650ce56bceffb036d6c633d78f092926
-      size: 20474
+      md5: ebee83187e0a755a19be6cff8909317f
+      size: 720971
     - path: reports/data_contract.json
       hash: md5
-      md5: ae2ba4523a90eb9ef5917055d2e56111
-      size: 1072
+      md5: 10c28da3b4bc8b294e37ae6f36e60df4
+      size: 1309
     - path: src/features.py
       hash: md5
       md5: 1dac1e54b02ef6999df78a6a3a5c7bd0
       size: 3160
     - path: src/preprocessing.py
       hash: md5
-      md5: 9601272eea66574da1f77939795f81ab
-      size: 9032
+      md5: bfc874a61e3ccc07061b6ec73c2f25ca
+      size: 9226
     params:
       params.yaml:
         audio:
@@ -86,7 +86,7 @@ stages:
           channels: 1
           window_seconds: 2.0
           hop_seconds: 0.5
-          min_duration_seconds: 2.0
+          min_duration_seconds: 1.0
           max_duration_seconds: 600
         features:
           n_mels: 64
@@ -98,8 +98,8 @@ stages:
     outs:
     - path: data/features
       hash: md5
-      md5: b8f874582509090e2566609c8a5bdead.dir
-      size: 54610095
+      md5: 9e164fa057a300b05d8399a3318392a1.dir
+      size: 464614669
       nfiles: 4
   train:
     cmd: python -m src.train
@@ -152,31 +152,224 @@ stages:
     deps:
     - path: data/features
       hash: md5
-      md5: b8f874582509090e2566609c8a5bdead.dir
-      size: 54610095
+      md5: 9e164fa057a300b05d8399a3318392a1.dir
+      size: 464614669
       nfiles: 4
-    - path: models/challenger.pt
+    - path: data/text/transcripts.csv
       hash: md5
-      md5: fb1d755bc456134d29fde985aec3aed6
-      size: 44763339
+      md5: 5d6c45049d549be2a94c1b67cd28ae05
+      size: 213224
+    - path: models/challenger_bundle
+      hash: md5
+      md5: 3b10a46712ad80b5ed79b41d098e780a.dir
+      size: 44999662
+      nfiles: 3
     - path: reports/train_run.json
       hash: md5
-      md5: cd606cabf8358942b40a5a30afbe5c2a
-      size: 130
+      md5: 77296a1beac647d387765626e5a39fc1
+      size: 129
+    - path: src/augment.py
+      hash: md5
+      md5: af02580be9318fb17acf4e98381d9653
+      size: 1250
+    - path: src/behavioural.py
+      hash: md5
+      md5: dc2fe75ccc982a4b168dd3c0c0743bc0
+      size: 7925
     - path: src/quality_gate.py
       hash: md5
-      md5: 2c23ea7be3a749520748793041537457
-      size: 9695
+      md5: bcd3752258f27a8c8d27f6daf1c5ecdf
+      size: 20139
     params:
       params.yaml:
+        fusion:
+          covert_base: 0.85
+          covert_stress_weight: 0.25
+          incongruence_weight: 0.4
+          alert_threshold: 0.5
+          review_threshold: 0.3
         quality_gate:
           min_accuracy_margin: 0.015
-          min_stressed_recall: 0.92
+          min_covert_recall: 0.9
+          max_genuine_false_alarm: 0.05
+          min_voice_accuracy: 0.65
           max_p95_latency_ms: 150
           latency_trials: 100
-          auto_promote: true
+          auto_promote: false
+          stress_profile:
+            genuine_emergency: 0.8
+            covert: 0.6
+            non_emergency: 0.1
+          behavioural:
+            min_functionality_accuracy: 0.9
+            invariance_min_agreement: 0.9
+            directional_max_genuine_alert: 0.02
+            directional_min_covert_alert: 0.85
+            clips_per_slice: 40
+            slice_min_accuracy: 0.6
+            slice_min_recall_stressed: 0.55
     outs:
     - path: reports/quality_gate.json
       hash: md5
-      md5: 0699576a4ab066600e34f093fb3464d5
-      size: 1022
+      md5: 1f33330ac423e95ac5e3642c3938fc82
+      size: 4603
+  train_acoustic:
+    cmd: python -m src.train
+    deps:
+    - path: data/features
+      hash: md5
+      md5: 9e164fa057a300b05d8399a3318392a1.dir
+      size: 464614669
+      nfiles: 4
+    - path: src/model.py
+      hash: md5
+      md5: aaedaeadfc5de052dfa83b72837b4613
+      size: 6610
+    - path: src/train.py
+      hash: md5
+      md5: 3efd54c318a23bb204fba16b3a094a17
+      size: 7341
+    params:
+      params.yaml:
+        train:
+          architecture: resnet18_2d
+          epochs: 6
+          batch_size: 32
+          learning_rate: 0.001
+          weight_decay: 0.0001
+          seed: 7
+    outs:
+    - path: models/acoustic.pt
+      hash: md5
+      md5: 10c58f1cf02f6a37cd505ef0c5055688
+      size: 44763083
+    - path: reports/acoustic_history.json
+      hash: md5
+      md5: 2cdfbdec2f9ddd5cefd32a000aef9c52
+      size: 1484
+    - path: reports/acoustic_metrics.json
+      hash: md5
+      md5: 9c67b7edef6f7e8817a93f621bcb5afa
+      size: 215
+  make_transcripts:
+    cmd: python -m src.transcripts
+    deps:
+    - path: src/transcripts.py
+      hash: md5
+      md5: 9995c60cea579a0cd4be8f3243d3a51d
+      size: 22889
+    params:
+      params.yaml:
+        text.per_family: 60
+        text.seed: 911
+    outs:
+    - path: data/text/transcripts.csv
+      hash: md5
+      md5: 5d6c45049d549be2a94c1b67cd28ae05
+      size: 213224
+  validate_text:
+    cmd: python -m src.text_contracts
+    deps:
+    - path: data/text/transcripts.csv
+      hash: md5
+      md5: 5d6c45049d549be2a94c1b67cd28ae05
+      size: 213224
+    - path: src/text_contracts.py
+      hash: md5
+      md5: c68679ead23670da470c26b0040c801e
+      size: 2895
+    params:
+      params.yaml:
+        text.min_class_ratio: 0.2
+    outs:
+    - path: reports/text_contract.json
+      hash: md5
+      md5: 3841182894762301ddc13867ffe3cf88
+      size: 921
+  train_text:
+    cmd: python -m src.text_model
+    deps:
+    - path: data/text/transcripts.csv
+      hash: md5
+      md5: 5d6c45049d549be2a94c1b67cd28ae05
+      size: 213224
+    - path: reports/text_contract.json
+      hash: md5
+      md5: 3841182894762301ddc13867ffe3cf88
+      size: 921
+    - path: src/text_model.py
+      hash: md5
+      md5: 7505b1e1852bfafac66585329e406882
+      size: 8680
+    params:
+      params.yaml:
+        text.model:
+          ngram_max: 2
+          min_df: 2
+          C: 2.0
+    outs:
+    - path: models/text_model.json
+      hash: md5
+      md5: 00e869e06c7229d0a355e715be42cf28
+      size: 236159
+    - path: reports/text_metrics.json
+      hash: md5
+      md5: 0575ff200a81cd46008096bd097adc46
+      size: 1409
+  package:
+    cmd: python -m src.package
+    deps:
+    - path: models/acoustic.pt
+      hash: md5
+      md5: 10c58f1cf02f6a37cd505ef0c5055688
+      size: 44763083
+    - path: models/text_model.json
+      hash: md5
+      md5: 00e869e06c7229d0a355e715be42cf28
+      size: 236159
+    - path: reports/acoustic_metrics.json
+      hash: md5
+      md5: 9c67b7edef6f7e8817a93f621bcb5afa
+      size: 215
+    - path: reports/text_metrics.json
+      hash: md5
+      md5: 0575ff200a81cd46008096bd097adc46
+      size: 1409
+    - path: src/bundle.py
+      hash: md5
+      md5: a1b73ea84ebe5ced6af3f1a82597551a
+      size: 3347
+    - path: src/fusion.py
+      hash: md5
+      md5: 8d3df346bfd1b04c7a545f1919b11a3f
+      size: 3031
+    - path: src/mlflow_model.py
+      hash: md5
+      md5: 5bdee684f1a12ef57babfa9d7a2fc7d7
+      size: 1118
+    - path: src/package.py
+      hash: md5
+      md5: 018e5fe05b06d7b96ee7b79a777fc760
+      size: 6141
+    params:
+      params.yaml:
+        fusion:
+          covert_base: 0.85
+          covert_stress_weight: 0.25
+          incongruence_weight: 0.4
+          alert_threshold: 0.5
+          review_threshold: 0.3
+        mlflow:
+          tracking_uri: http://localhost:5000
+          experiment_name: covert-call-911
+          registered_model_name: covert-call-detector
+    outs:
+    - path: models/challenger_bundle
+      hash: md5
+      md5: 3b10a46712ad80b5ed79b41d098e780a.dir
+      size: 44999662
+      nfiles: 3
+    - path: reports/train_run.json
+      hash: md5
+      md5: 77296a1beac647d387765626e5a39fc1
+      size: 129

@@ -270,7 +270,7 @@ def shadow_report(calls: list[dict[str, Any]]) -> dict[str, Any]:
         if not labelled:
             return None
         return float(
-            np.mean([bool(c[alert_key]) == (c["true_label"] == "stressed") for c in labelled])
+            np.mean([bool(c[alert_key]) == (c["true_label"] == "threat") for c in labelled])
         )
 
     return {

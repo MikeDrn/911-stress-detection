@@ -1,7 +1,7 @@
 [project]
 name = "voice-stress-911"
 version = "1.0.0"
-description = "911 Under-Threat Voice Stress Detection System - single-machine MLOps reference implementation"
+description = "911 Under-Threat (covert call) Detection System - content + voice, single-machine MLOps"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 # Core dependencies are shared by every service (API, UI, training).
@@ -13,11 +13,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Deep-learning + audio feature stack (training and inference).
+# Deep-learning + audio feature stack (training and inference). scikit-learn trains
+# the transcript model (inference is plain NumPy).
 ml = [
     "torch>=2.4",
     "torchvision>=0.19",
     "librosa>=0.10.2",
+    "scikit-learn>=1.4",
+]
+# Offline speech-to-text (Whisper via CTranslate2) for the inference service.
+asr = [
+    "faster-whisper>=1.0",
 ]
 # FastAPI inference service.
 api = [

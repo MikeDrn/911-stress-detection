@@ -38,7 +38,7 @@ class AudioSpec:
     channels: int = 1
     window_seconds: float = 2.0
     hop_seconds: float = 0.5
-    min_duration_seconds: float = 2.0
+    min_duration_seconds: float = 1.0
     max_duration_seconds: float = 600.0
 
     @classmethod
@@ -135,11 +135,14 @@ def sliding_windows(y: np.ndarray, spec: AudioSpec) -> tuple[np.ndarray, np.ndar
     Returns ``(windows, start_times)`` where ``windows`` has shape
     ``(n_windows, window_samples)`` and ``start_times`` is in seconds. Trailing
     audio shorter than one hop is dropped (it is still covered by the previous
-    overlapping window).
+    overlapping window). A clip shorter than one window (the contract allows
+    >= ``min_duration_seconds``) is zero-padded to exactly one window.
     """
     win, hop = spec.window_samples, spec.hop_samples
+    if len(y) == 0:
+        raise AudioContractError("Signal is empty.")
     if len(y) < win:
-        raise AudioContractError(f"Signal has {len(y)} samples; one window needs {win} samples.")
+        y = np.pad(y, (0, win - len(y)))
     n = 1 + (len(y) - win) // hop
     idx = np.arange(win)[None, :] + hop * np.arange(n)[:, None]
     windows = y[idx].astype(np.float32, copy=False)
@@ -242,5 +245,6 @@ def preprocess_call(
         "duration_s": len(y) / float(audio_spec.sample_rate),
         "starts": starts,
         "ends": starts + audio_spec.window_seconds,
+        "audio": y,  # raw samples, for speech-to-text
         **feats,
     }

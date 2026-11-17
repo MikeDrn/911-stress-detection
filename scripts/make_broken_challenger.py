@@ -1,8 +1,8 @@
 """Register a deliberately broken @challenger to demo an automatic canary rollback.
 
-Copies the current @champion and sabotages its output layer so every window is
-scored "stressed" (a silent failure: HTTP 200, confident, wrong - Course 7
-slide 7). It is registered as a new version and given the @challenger alias.
+Copies the current @champion bundle and sabotages its VOICE model's output layer so
+every window is scored "stressed" (a silent failure: HTTP 200, confident, wrong -
+Course 7 slide 7). The bundle is registered as a new version with alias @challenger.
 A canary then catches it with the class-collapse guardrail and rolls back.
 
     uv run python -m scripts.make_broken_challenger            # create + alias it
@@ -14,12 +14,15 @@ Never point @champion at this version.
 from __future__ import annotations
 
 import argparse
+import json
+import shutil
 import tempfile
 from pathlib import Path
 
 import torch
 
 from src import registry
+from src.bundle import BUNDLE_FILE
 from src.config import PROJECT_ROOT, load_params, tracking_uri
 from src.model import load_checkpoint, save_checkpoint
 
@@ -44,20 +47,24 @@ def main(argv: list[str] | None = None) -> int:
 
     import mlflow
 
-    from src.mlflow_model import StressPyfunc
+    from src.mlflow_model import CallPyfunc
 
     current = registry.version_by_alias(uri, name, registry.CHALLENGER)
     if current is not None:
         client.set_registered_model_tag(name, "challenger_before_sabotage", current.version)
     with tempfile.TemporaryDirectory() as td:
-        ckpt = registry.download_checkpoint(uri, name, registry.CHAMPION, td)
-        model, cfg = load_checkpoint(ckpt)
+        bundle = registry.download_bundle(uri, name, registry.CHAMPION, Path(td) / "src")
+        out = Path(td) / "broken_bundle"
+        shutil.copytree(bundle, out)
+        model, cfg = load_checkpoint(out / "acoustic.pt")
         with torch.no_grad():
             linear = model.fc[-1]
             linear.weight.mul_(0.0)
             linear.bias.copy_(torch.tensor([-6.0, 6.0]))  # P(stressed) ~ 1.0 for every window
-        out = Path(td) / "model.pt"
-        save_checkpoint(model, out, cfg)
+        save_checkpoint(model, out / "acoustic.pt", cfg)
+        meta = json.loads((out / BUNDLE_FILE).read_text())
+        meta["sabotaged"] = True
+        (out / BUNDLE_FILE).write_text(json.dumps(meta, indent=2))
 
         mlflow.set_experiment(params["mlflow"]["experiment_name"])
         with mlflow.start_run(run_name="SABOTAGED-canary-demo") as run:
@@ -66,8 +73,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             mlflow.pyfunc.log_model(
                 name="model",
-                python_model=StressPyfunc(),
-                artifacts={"checkpoint": str(out)},
+                python_model=CallPyfunc(),
+                artifacts={"bundle": str(out)},
                 code_paths=[str(PROJECT_ROOT / "src")],
                 pip_requirements=["torch", "torchvision", "numpy", "librosa", "soundfile"],
                 registered_model_name=name,

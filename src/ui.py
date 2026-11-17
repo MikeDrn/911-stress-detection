@@ -17,8 +17,10 @@ Run locally:  streamlit run src/ui.py
 
 from __future__ import annotations
 
+import html
 import io
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -53,6 +55,13 @@ st.markdown(
         background:{GREEN}; color:white; padding:14px 22px; border-radius:10px;
         font-size:1.1rem; font-weight:600;
     }}
+    .review-banner {{
+        background:{AMBER}; color:black; padding:14px 22px; border-radius:10px;
+        font-size:1.1rem; font-weight:600;
+    }}
+    .transcript {{ background:#f5f5f7; color:#111; padding:12px 16px; border-radius:8px;
+                  font-size:1.05rem; line-height:1.6; }}
+    mark.ev {{ background:#ffd166; padding:0 3px; border-radius:3px; font-weight:700; }}
     .wait-banner {{
         background:#264653; color:white; padding:14px 22px; border-radius:10px;
         font-size:1.05rem;
@@ -79,9 +88,14 @@ def api_health(base: str) -> tuple[int, dict]:
         return 0, {"status": "unreachable", "error": str(exc)}
 
 
-def api_predict(base: str, name: str, data: bytes) -> tuple[int, dict]:
+def api_predict(
+    base: str, name: str, data: bytes, transcript: str | None = None
+) -> tuple[int, dict]:
     try:
-        r = requests.post(f"{base}/predict", files={"file": (name, data, "audio/wav")}, timeout=120)
+        form = {"transcript": transcript} if transcript and transcript.strip() else None
+        r = requests.post(
+            f"{base}/predict", files={"file": (name, data, "audio/wav")}, data=form, timeout=180
+        )
         return r.status_code, r.json()
     except requests.RequestException as exc:
         return 0, {"detail": str(exc)}
@@ -118,7 +132,9 @@ def windows_frame(windows: list[dict], threshold: float) -> pd.DataFrame:
     df["center_s"] = (df["start_s"] + df["end_s"]) / 2
     df["level"] = df.apply(
         lambda r: (
-            "ALERT" if r["in_alert"] else ("above θ" if r["duress_score"] > threshold else "normal")
+            "sustained"
+            if r["in_alert"]
+            else ("above θ" if r["duress_score"] > threshold else "normal")
         ),
         axis=1,
     )
@@ -133,7 +149,7 @@ def score_chart(df: pd.DataFrame, threshold: float, segments: list[dict], durati
         y=alt.Y("duress_score:Q", title="Duress confidence", scale=alt.Scale(domain=[0, 1])),
         color=alt.Color(
             "level:N",
-            scale=alt.Scale(domain=["normal", "above θ", "ALERT"], range=[GREY, AMBER, RED]),
+            scale=alt.Scale(domain=["normal", "above θ", "sustained"], range=[GREY, AMBER, RED]),
             legend=alt.Legend(title=None, orient="top"),
         ),
         tooltip=["index", "start_s", "end_s", alt.Tooltip("duress_score:Q", format=".3f"), "level"],
@@ -159,7 +175,7 @@ def style_windows(df: pd.DataFrame, threshold: float):
     cols = ["index", "start_s", "end_s", "duress_score", "level"]
 
     def paint(row):
-        if row["level"] == "ALERT":
+        if row["level"] == "sustained":
             return [f"background-color:{RED}; color:white; font-weight:700"] * len(row)
         if row["duress_score"] > threshold:
             return [f"background-color:{AMBER}; color:black"] * len(row)
@@ -173,43 +189,125 @@ def style_windows(df: pd.DataFrame, threshold: float):
 
 
 def banner(result: dict, upto_window: int | None = None) -> str:
-    segs = [
-        s for s in result["alert_segments"] if upto_window is None or s["end_window"] <= upto_window
-    ]
-    if segs:
-        spans = ", ".join(
-            f"{s['start_s']:.1f}s–{s['end_s']:.1f}s (peak {s['max_score']:.2f})" for s in segs
-        )
-        return (
-            f'<div class="alert-banner">🚨 PRIORITY ALERT — sustained duress indicators '
-            f"in segment(s): {spans}. Review call immediately.</div>"
-        )
     if upto_window is not None and upto_window < result["n_windows"] - 1:
-        return '<div class="wait-banner">📡 Monitoring live call…</div>'
-    return (
-        '<div class="ok-banner">✅ No sustained stress pattern above '
-        f"θ = {result['threshold']:.2f} detected.</div>"
-    )
+        return '<div class="wait-banner">📡 Analysing call… voice stress timeline updating</div>'
+    level, reason = result.get("threat_level", "normal"), html.escape(result.get("reason", ""))
+    if level == "alert":
+        return (
+            '<div class="alert-banner">🚨 POSSIBLE COVERT CALL — caller may be under threat '
+            f"(threat score {result['threat_score']:.2f}). {reason}</div>"
+        )
+    if level == "review":
+        return (
+            '<div class="review-banner">⚠️ REVIEW — something does not fit '
+            f"(threat score {result['threat_score']:.2f}). {reason}</div>"
+        )
+    return f'<div class="ok-banner">✅ No covert-call indication. {reason}</div>'
+
+
+def highlight(transcript: str, evidence: list[str]) -> str:
+    """Bold-highlight the words/phrases that pushed the content model's decision."""
+    out = html.escape(transcript or "")
+    for term in sorted(evidence, key=len, reverse=True):
+        out = re.sub(
+            rf"(?<![\w'])({re.escape(html.escape(term))})(?![\w'])",
+            r'<mark class="ev">\1</mark>',
+            out,
+            flags=re.IGNORECASE,
+        )
+    return out
+
+
+def content_panel(result: dict) -> None:
+    left, right = st.columns([3, 2])
+    with left:
+        src = {
+            "asr": "speech-to-text (Whisper)",
+            "provided": "typed by dispatcher / upstream",
+            "unavailable": "not available",
+        }[result.get("transcript_source", "unavailable")]
+        st.markdown(f"**What the caller said** · _{src}_")
+        content = result.get("content") or {}
+        if result.get("transcript"):
+            marked = highlight(result["transcript"], content.get("evidence", []))
+            st.markdown(f'<div class="transcript">{marked}</div>', unsafe_allow_html=True)
+            if content.get("evidence"):
+                st.caption("Highlighted = words that most pushed the content decision.")
+        else:
+            st.info("No transcript - content could not be assessed.")
+    with right:
+        if content:
+            probs = pd.DataFrame(
+                {"class": list(content["probs"]), "p": list(content["probs"].values())}
+            )
+            st.altair_chart(
+                alt.Chart(probs)
+                .mark_bar()
+                .encode(
+                    x=alt.X(
+                        "p:Q", title="Content model probability", scale=alt.Scale(domain=[0, 1])
+                    ),
+                    y=alt.Y("class:N", title=None, sort="-x", axis=alt.Axis(labelLimit=200)),
+                    color=alt.Color(
+                        "class:N",
+                        legend=None,
+                        scale=alt.Scale(
+                            domain=["covert", "genuine_emergency", "non_emergency"],
+                            range=[RED, BLUE, GREY],
+                        ),
+                    ),
+                )
+                .properties(height=150),
+                width="stretch",
+            )
 
 
 def render_result(result: dict, audio: bytes, animate: bool, speed: float) -> None:
     threshold = result["threshold"]
     df = windows_frame(result["windows"], threshold)
     banner_ph, metrics_ph = st.empty(), st.container()
+    content_ph = st.container()
     chart_ph, table_ph = st.empty(), st.empty()
 
     with metrics_ph:
         c = st.columns(5)
-        c[0].metric("Call duration", f"{result['duration_s']:.1f} s")
-        c[1].metric("Windows scored", result["n_windows"])
-        c[2].metric("Peak duress", f"{result['max_score']:.3f}")
-        c[3].metric("Server latency", f"{result['latency_ms']:.0f} ms")
-        c[4].metric("Alert rule", f"θ>{threshold:.2f} × {result['consecutive_windows']}")
+        c[0].metric(
+            "Threat score",
+            f"{result.get('threat_score', 0):.2f}",
+            help="Fused content + voice score; ≥ 0.50 alert, ≥ 0.30 review",
+        )
+        content = result.get("content") or {}
+        short = {
+            "covert": "covert",
+            "genuine_emergency": "emergency",
+            "non_emergency": "non-emergency",
+        }
+        c[1].metric(
+            "Content",
+            short.get(content.get("label"), "—"),
+            help="Transcript class: covert / genuine emergency / non-emergency",
+        )
+        c[2].metric(
+            "Voice stress",
+            f"{result.get('stress_score', 0):.2f}",
+            help="Mean P(stressed voice) over the 2 s windows",
+        )
+        c[3].metric("Call duration", f"{result['duration_s']:.1f} s")
+        c[4].metric(
+            "Server latency",
+            f"{result['latency_ms']:.0f} ms",
+            help=f"of which speech-to-text {result.get('asr_ms', 0):.0f} ms",
+        )
         st.caption(
             f"Model `{result['model_version']}` · served by **{result.get('served_by')}** "
             f"· release mode `{result.get('rollout_mode')}` · call id `{result['call_id']}`"
         )
-    st.audio(io.BytesIO(audio), format="audio/wav")
+    with content_ph:
+        st.audio(io.BytesIO(audio), format="audio/wav")
+        content_panel(result)
+        st.markdown(
+            "**Voice stress timeline** (2 s windows · stress alone is *not* a threat on 911)"
+        )
 
     if animate and len(df) > 1:
         hop = float(df["start_s"].iloc[1] - df["start_s"].iloc[0])
@@ -227,7 +325,7 @@ def render_result(result: dict, audio: bytes, animate: bool, speed: float) -> No
         width="stretch",
     )
     with table_ph.container():
-        st.markdown("**Window-level scores** (red = part of an alert run, amber = above θ)")
+        st.markdown("**Window-level voice scores** (red = sustained stress run, amber = above θ)")
         st.dataframe(
             style_windows(df, threshold),
             hide_index=True,
@@ -245,8 +343,8 @@ def feedback_box(api: str, result: dict) -> None:
     done = st.session_state.get("feedback_done", {}).get(result["call_id"])
     c1, c2, _ = st.columns([1, 1, 2])
     for col, label, text in (
-        (c1, "stressed", "🆘 Caller WAS under duress"),
-        (c2, "calm", "🙂 Caller was NOT under duress"),
+        (c1, "threat", "🆘 Caller WAS under threat"),
+        (c2, "no_threat", "🙂 Caller was NOT under threat"),
     ):
         if col.button(text, key=f"fb-{label}-{result['call_id']}", disabled=bool(done)):
             code, body = api_post(
@@ -767,6 +865,13 @@ with tab_call:
         demos = sorted(DEMO_DIR.glob("*.wav")) if DEMO_DIR.is_dir() else []
         demo_choice = st.selectbox("…or pick a demo call", ["—"] + [p.name for p in demos])
 
+    typed = st.text_area(
+        "Optional: what the caller said (leave empty to use speech-to-text)",
+        placeholder="e.g. hi, I'd like to order a large pizza with pepperoni to 61 elm street",
+        height=80,
+        help="Use this to replay a scenario, or when the recording is not in English.",
+    )
+
     audio_bytes, name = None, None
     if uploaded is not None:
         audio_bytes, name = uploaded.getvalue(), uploaded.name
@@ -774,8 +879,8 @@ with tab_call:
         audio_bytes, name = (DEMO_DIR / demo_choice).read_bytes(), demo_choice
 
     if st.button("▶️ Analyze call", type="primary", disabled=audio_bytes is None):
-        with st.spinner("Scoring call windows…"):
-            status, body = api_predict(api, name, audio_bytes)
+        with st.spinner("Transcribing and scoring the call…"):
+            status, body = api_predict(api, name, audio_bytes, typed)
         if status == 200:
             st.session_state["last"] = {"result": body, "audio": audio_bytes, "fresh": True}
         elif status == 422:
@@ -810,12 +915,16 @@ with tab_audit:
             "received_at",
             "call_id",
             "filename",
-            "mode",
-            "arm",
-            "max_score",
+            "threat_level",
+            "threat_score",
+            "content_label",
+            "stress_score",
             "alert",
             "true_label",
             "correct",
+            "mode",
+            "arm",
+            "transcript",
             "model_version",
             "latency_ms",
         ]
@@ -830,7 +939,10 @@ with tab_audit:
                     else [""] * len(r)
                 ),
                 axis=1,
-            ).format({"max_score": "{:.3f}", "latency_ms": "{:.0f}"}),
+            ).format(
+                {"threat_score": "{:.2f}", "stress_score": "{:.2f}", "latency_ms": "{:.0f}"},
+                na_rep="—",
+            ),
             hide_index=True,
             width="stretch",
         )

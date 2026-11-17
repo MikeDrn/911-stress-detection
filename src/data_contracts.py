@@ -27,6 +27,7 @@ import argparse
 import csv
 import hashlib
 import json
+import re
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -47,8 +48,20 @@ MANIFEST_FIELDS = [
     "duration_s",
     "sample_rate",
     "channels",
+    "speaker",
 ]
 SPLITS = ("train", "val", "test")
+_SPEAKER_RE = re.compile(r"^(?:phone_)?cremad_(\d{4})_")
+
+
+def speaker_of(path: str | Path) -> str:
+    """Speaker id from the file name (CREMA-D actor), or '' when unknown.
+
+    Phone-line augmented copies (``phone_cremad_1001_...``) map to the same actor,
+    so an original and its augmented copy always land in the same split.
+    """
+    m = _SPEAKER_RE.match(Path(path).name)
+    return f"cremad{m.group(1)}" if m else ""
 
 
 def sha256_file(path: str | Path, chunk: int = 1 << 20) -> str:
@@ -78,6 +91,7 @@ def scan_raw(raw_dir: Path, classes: list[str]) -> list[dict[str, Any]]:
                     "label": label,
                     "label_idx": idx,
                     "sha256": sha256_file(wav),
+                    "speaker": speaker_of(wav),
                 }
             )
     return rows
@@ -86,26 +100,53 @@ def scan_raw(raw_dir: Path, classes: list[str]) -> list[dict[str, Any]]:
 def assign_splits(
     rows: list[dict[str, Any]], test_fraction: float, val_fraction: float, seed: int
 ) -> None:
-    """Stratified split at the level of unique content hashes (in place)."""
-    rng = np.random.default_rng(seed)
-    by_label: dict[str, list[str]] = defaultdict(list)
-    hash_label: dict[str, str] = {}
-    for r in rows:
-        if r["sha256"] not in hash_label:
-            hash_label[r["sha256"]] = r["label"]
-            by_label[r["label"]].append(r["sha256"])
+    """Group-level split (in place).
 
-    split_of_hash: dict[str, str] = {}
-    for _, hashes in sorted(by_label.items()):
-        hashes = sorted(hashes)
-        rng.shuffle(hashes)
-        n = len(hashes)
+    * Rows with a known speaker are split **by speaker**: every clip of an actor
+      lands in the same split, so the model can never recognise a voice it was
+      trained on (speaker leakage - invisible to a file-hash check).
+    * Rows without a speaker are split by content hash, stratified by label, so
+      byte-identical duplicates can never straddle two splits.
+    """
+    rng = np.random.default_rng(seed)
+
+    def cut(keys: list[str]) -> dict[str, str]:
+        keys = sorted(keys)
+        rng.shuffle(keys)
+        n = len(keys)
         n_test = max(1, int(round(n * test_fraction)))
         n_val = max(1, int(round(n * val_fraction))) if n >= 3 else 0
-        for i, h in enumerate(hashes):
-            split_of_hash[h] = "test" if i < n_test else "val" if i < n_test + n_val else "train"
+        return {
+            k: "test" if i < n_test else "val" if i < n_test + n_val else "train"
+            for i, k in enumerate(keys)
+        }
+
+    speakers = sorted({r["speaker"] for r in rows if r.get("speaker")})
+    split_of_speaker = cut(speakers) if speakers else {}
+
+    by_label: dict[str, list[str]] = defaultdict(list)
+    seen: set[str] = set()
     for r in rows:
-        r["split"] = split_of_hash[r["sha256"]]
+        if not r.get("speaker") and r["sha256"] not in seen:
+            seen.add(r["sha256"])
+            by_label[r["label"]].append(r["sha256"])
+    split_of_hash: dict[str, str] = {}
+    for _, hashes in sorted(by_label.items()):
+        split_of_hash.update(cut(hashes))
+
+    for r in rows:
+        r["split"] = (
+            split_of_speaker[r["speaker"]] if r.get("speaker") else split_of_hash[r["sha256"]]
+        )
+
+
+def check_speaker_leakage(rows: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Return {speaker: [splits...]} for every speaker present in more than one split."""
+    splits_by_speaker: dict[str, set[str]] = defaultdict(set)
+    for r in rows:
+        if r.get("speaker"):
+            splits_by_speaker[r["speaker"]].add(r["split"])
+    return {s: sorted(v) for s, v in splits_by_speaker.items() if len(v) > 1}
 
 
 def build_manifest(params: dict[str, Any] | None = None) -> Path:
@@ -224,6 +265,10 @@ def validate_manifest(
 
     leaks = check_leakage(rows)
     report.record("no_train_test_leakage_sha256", not leaks, leaked_hashes=leaks)
+
+    spk = check_speaker_leakage(rows)
+    n_speakers = len({r.get("speaker") for r in rows if r.get("speaker")})
+    report.record("no_speaker_leakage", not spk, n_speakers=n_speakers, leaked_speakers=spk)
 
     conflicts = check_label_conflicts(rows)
     report.record("no_label_conflicts", not conflicts, conflicts=conflicts)

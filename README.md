@@ -1,449 +1,230 @@
-# 911 Under-Threat Voice Stress Detection System
+# 911 Under-Threat (Covert Call) Detection System
 
-A single-machine MLOps reference implementation. It scores short windows of emergency-call
-audio for acoustic stress and highlights sustained high-stress segments on a dispatcher console.
+A single-machine MLOps system that helps an emergency dispatcher spot **callers who are
+under threat but cannot say so**, such as someone "ordering a pizza" on 911 while an
+attacker listens.
 
-> **Scope.** This is a decision-support prototype for a university demonstration. The bundled
-> dataset is **synthetic** (parametric voice synthesis, see `src/synthetic.py`), so a model
-> trained on it says nothing about real callers. A high score means "this window resembles the
-> stressed training class", never "this caller is in danger". The dispatcher always decides.
+> **The core idea.** On a 911 line, stress is *normal*: "someone is dead in front of me"
+> should sound terrified, and must **not** raise a threat alert. The warning sign is a
+> **mismatch**: content that does not belong on an emergency line ("a large pizza with
+> pepperoni") or that plays along with the dispatcher's coded questions ("yes, with
+> pepperoni"), sometimes combined with tension in the voice. The system therefore
+> combines **what is said** (speech-to-text + a transcript classifier) with **how it is
+> said** (a voice-stress model) and explains every flag to the dispatcher.
+>
+> **Scope.** This is a decision-support prototype for a university project. The voice
+> model is trained on **real acted speech** (CREMA-D: neutral vs fear), and the content
+> model on **authored call scripts** (no public dataset of real covert 911 calls exists).
+> A flag means "worth a closer look", never "proof of a threat". The dispatcher decides.
 
 ---
 
-## 1. Architecture
+## 1. How a call is analysed
 
 ```mermaid
 flowchart LR
-    subgraph Host["Your laptop (host)"]
-        RAW[(data/raw<br/>WAV clips)] -- dvc add --> DVC[(DVC cache +<br/>local remote)]
-        PIPE["dvc repro<br/>prepare → validate → featurize → train → quality_gate"]
-        RAW --> PIPE
-    end
-    subgraph NET["Docker bridge network: 911-net"]
-        MLF["mlflow-server :5000<br/>SQLite backend + artifacts<br/>registry @champion / @challenger"]
-        API["stress-api :8000<br/>FastAPI · /health · /predict<br/>ResNet-18 · SQLite telemetry"]
-        UI["dispatcher-ui :8501<br/>Streamlit console"]
-    end
-    PIPE -- "log runs, register model,<br/>set aliases" --> MLF
-    API -- "download models:/…@champion" --> MLF
-    UI -- "REST /predict /telemetry" --> API
+    A[Call audio<br/>16 kHz mono WAV] --> C{Data contract}
+    C -->|valid| W[2 s windows<br/>0.5 s hop]
+    C -->|invalid| X[HTTP 422]
+    W --> V["Voice model (ResNet-18)<br/>P(stressed) per window"]
+    A --> S["Speech-to-text<br/>(Whisper, offline)"]
+    S --> T["Content model (TF-IDF + LR)<br/>covert / genuine emergency / non-emergency"]
+    V --> F["Fusion rule<br/>threat score"]
+    T --> F
+    F --> D["Dispatcher console<br/>ALERT / REVIEW / normal + reason"]
+    F --> L[(SQLite audit log)]
 ```
 
-Per call: WAV upload → **data contract** (16 kHz, mono, WAV, ≥ 2 s) → **2.0 s windows with
-0.5 s hop** → **Log-Mel (64×201) + MFCC (20×201)** → **ResNet-18** → P(stressed) per window →
-**alert rule**: at least 3 *consecutive* windows with score **θ > 0.82** → asynchronous
-**SQLite audit** → dispatcher console shows the segment in **red**.
+**Fusion rule** (`src/fusion.py`, parameters in `params.yaml → fusion`):
+
+```
+threat = p_covert × (0.85 + 0.25 × stress)  +  0.40 × p_non_emergency × stress
+ALERT if threat ≥ 0.50  ·  REVIEW if threat ≥ 0.30
+```
+
+| Situation | Result |
+|---|---|
+| Genuine emergency + terrified voice | **normal**: stress is expected (p_covert ≈ 0) |
+| Covert-looking content + calm voice | **ALERT**: content carries most of the weight |
+| Covert-looking content + tense voice | **ALERT**, higher score |
+| Harmless question + terrified voice | **REVIEW**: content and voice do not match |
+| No transcript available | **normal**, voice stress shown for information only |
+
+The weights were chosen on the **validation** scenario families, never on the test set.
+
+## 2. The MLOps system
+
+```mermaid
+flowchart LR
+    subgraph Host["Your laptop"]
+        RAW[(data/raw: CREMA-D<br/>dvc add)] --> PIPE
+        PIPE["dvc repro<br/>voice: prepare → validate → featurize → train_acoustic<br/>content: make_transcripts → validate_text → train_text<br/>package → quality_gate"]
+    end
+    subgraph NET["Docker network 911-net"]
+        MLF["mlflow-server :5000<br/>registry @champion / @challenger"]
+        API["stress-api :8000<br/>FastAPI · Whisper · bundle<br/>shadow / canary / A/B / bandit"]
+        UI["dispatcher-ui :8501<br/>Streamlit"]
+    end
+    PIPE -- "one run per bundle,<br/>register @challenger" --> MLF
+    API -- "follows the aliases live" --> MLF
+    UI -- REST --> API
+```
 
 | Concern | Tool | Where |
 |---|---|---|
-| Package management | uv, Python 3.11 | `pyproject.toml`, `.python-version` |
-| Data and feature versioning | DVC, local remote | `dvc.yaml`, `data/raw.dvc`, `dvc.lock` |
-| Data contracts | SHA-256 leakage, format, class floors | `src/data_contracts.py` |
-| Features | librosa Log-Mel + MFCC | `src/preprocessing.py` |
-| Model | ResNet-18 (2-D Log-Mel / 1-D MFCC) | `src/model.py` |
-| Experiments and registry | MLflow (SQLite backend), aliases | `src/train.py`, `src/registry.py` |
-| Promotion gate | champion vs challenger, behavioural tests, human approval | `src/quality_gate.py`, `src/behavioural.py` |
-| Online evaluation (Course 4) | shadow, canary, A/B test, bandits | `src/rollout.py`, `src/bandits.py` |
+| Packages | uv, Python 3.11 | `pyproject.toml` |
+| Data versioning | DVC (local remote) | `dvc.yaml`, `data/raw.dvc`, `dvc.lock` |
+| Audio data contracts | format, SHA-256 leakage, **speaker leakage**, class floors | `src/data_contracts.py` |
+| Text data contracts | schema, **scenario-family leakage**, duplicate leakage, coverage | `src/text_contracts.py` |
+| Voice model | ResNet-18 on Log-Mel spectrograms | `src/model.py`, `src/train.py` |
+| Content model | explainable TF-IDF + logistic regression, exported to JSON | `src/text_model.py` |
+| Speech-to-text | faster-whisper `base.en`, baked into the API image | `src/asr.py`, `Dockerfile` |
+| Fusion + bundle | one registered unit: voice + content + rule | `src/fusion.py`, `src/bundle.py`, `src/package.py` |
+| Experiment tracking, registry | MLflow (SQLite backend), aliases | `src/package.py`, `src/registry.py` |
+| Quality gate | covert recall, genuine-emergency false alarms, behavioural tests | `src/quality_gate.py`, `src/behavioural.py` |
+| Online evaluation (Course 4) | shadow, canary, A/B, bandits | `src/rollout.py`, `src/bandits.py` |
 | Serving | FastAPI with readiness probes | `src/serve.py` |
-| Telemetry and audit | async SQLite (aiosqlite) | `src/telemetry.py` |
-| Operator UI | Streamlit | `src/ui.py` |
-| Orchestration | Docker Compose, `911-net` | `Dockerfile`, `docker-compose.yml` |
-| CI | GitHub Actions with FakeModel | `.github/workflows/ci.yml` |
+| Console | Streamlit | `src/ui.py` |
+| Orchestration | Docker Compose on `911-net` | `docker-compose.yml` |
+| CI/CD (Course 7) | GitHub Actions: tests → images tagged with the commit → approval | `.github/workflows/ci.yml` |
 
-## 2. Repository layout
+## 3. Data, and why the numbers are believable
 
-```
-911-stress-detection/
-├── .github/workflows/ci.yml     # CI: lint → contracts → tests → smoke → images; CD: push SHA tag → approval
-├── Dockerfile                   # multi-stage: targets api | ui | mlflow
-├── docker-compose.yml           # stress-api, mlflow-server, dispatcher-ui on 911-net
-├── dvc.yaml                     # reproducible pipeline definition
-├── params.yaml                  # every tunable number (θ, gate rules, canary steps, A/B, bandit…)
-├── pyproject.toml               # uv project; extras: ml, api, tracking, ui; dev group
-├── .env.example                 # compose overrides (MODEL_SOURCE, delays, ports, image tags)
-├── scripts/
-│   ├── generate_synthetic_data.py  # corpus → data/raw/{calm,stressed}; --channel phone = data shift
-│   ├── make_demo_calls.py          # 5 demo calls → data/demo
-│   ├── simulate_traffic.py         # labelled calls + dispatcher feedback (Course 4 demos)
-│   ├── make_broken_challenger.py   # sabotaged @challenger → automatic canary rollback demo
-│   ├── convert_audio.py            # any recording → 16 kHz mono WAV
-│   └── smoke_test.py               # post-deploy probe + /predict check
-├── src/
-│   ├── config.py  preprocessing.py  synthetic.py  data_contracts.py  features.py
-│   ├── model.py   fake_model.py     train.py      quality_gate.py     registry.py
-│   ├── behavioural.py               # Course 7: min-functionality / invariance / slice tests
-│   ├── rollout.py  bandits.py       # Course 4: shadow, canary, A/B statistics, bandit policies
-│   ├── mlflow_model.py  alerting.py  telemetry.py  serve.py  ui.py
-└── tests/
-    ├── conftest.py               # WAV factory + FakeModel API client
-    ├── test_preprocessing.py     # contract, windowing, feature shapes
-    ├── test_data_contracts.py    # SHA-256 leakage, format, integrity, class floors
-    ├── test_alerting.py          # θ / consecutive-window rule
-    ├── test_model.py             # ResNet-18 adaptations, checkpoint round-trip
-    ├── test_api.py               # 503→200 probes, /predict schema, 422s, audit log
-    ├── test_rollout.py           # canary/A-B statistics vs the Course 4 worked examples
-    ├── test_bandits.py           # ε-greedy, UCB1, Thompson, regret vs A/B
-    ├── test_api_rollout.py       # shadow, canary rollback, A/B, bandit through the API
-    ├── test_behavioural.py       # behavioural tests with FakeModels
-    └── test_pipeline_smoke.py    # (slow) whole pipeline offline, 1 epoch
-```
-
----
-
-## 3. Step-by-step local execution guide
-
-The commands work in the **VS Code terminal** on Windows (PowerShell), macOS and Linux unless
-marked. Each step ends with **Why**, which ties it to an MLOps principle you can use in the
-presentation.
-
-### Step 0: Install the tools (one time)
-
-1. **Docker Desktop**: <https://www.docker.com/products/docker-desktop/>. On Windows, accept the
-   WSL 2 backend. Start it and wait until the whale icon says *Engine running*.
-2. **VS Code**: <https://code.visualstudio.com/>, plus the *Python* and *Docker* extensions.
-3. **Git**: <https://git-scm.com/downloads>.
-4. **uv**: in a terminal:
-   - Windows (PowerShell): `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
-   - macOS / Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
-
-   **Close and reopen VS Code** afterwards so the terminal picks up `uv`. Check with `uv --version`, `git --version` and `docker --version`.
-5. Tell Git who you are, once per machine:
-   `git config --global user.name "Your Name"` and
-   `git config --global user.email "you@example.com"`.
-
-**Why:** you need a small, explicit toolchain: one container runtime, one package manager and
-one VCS. That makes "works on my machine" reproducible on any other machine.
-
-### Step 1: Open the project
-
-Unzip, then in VS Code use **File → Open Folder… → `911-stress-detection`**. Open a terminal
-with **Terminal → New Terminal**. All commands below run from this folder.
-
-### Step 2: Create the Python environment
-
-```bash
-uv sync --all-extras
-```
-
-uv downloads Python 3.11 if needed, creates `.venv/` and installs every dependency. PyTorch comes
-from the **CPU-only** index, so there's no 2.5 GB CUDA download. Then in VS Code press
-`Ctrl/Cmd+Shift+P`, choose **Python: Select Interpreter**, and pick `.venv`.
-
-**Why:** the environment is *declared* in `pyproject.toml` and isolated per project. `uv sync`
-also writes **`uv.lock`**, which pins exact versions. Commit it so CI, Docker and your teammates
-resolve identical packages.
-
-### Step 3: Run the fast test suite
-
-```bash
-uv run pytest -m "not slow"
-```
-
-You should see about 51 tests pass in a few seconds.
-
-**Why:** this is the base of the **ML test pyramid**. `FakeModel` (`src/fake_model.py`) replaces the
-11 M-parameter network, so the API contract, the 503/200 probes, the alert rule, the data
-contracts and SQLite auditing are all verified without a GPU or any weights. That's why CI is fast.
-
-### Step 4: Put the project under Git and DVC
-
-```bash
-git init
-uv run dvc init
-uv run dvc remote add -d localstore ../911-dvc-storage
-git add .
-git commit -m "Project scaffold"
-```
-
-**Why:** Git versions **code**. DVC versions **data and models** by storing content hashes in
-small `.dvc`/`dvc.lock` files that Git tracks, while the heavy files go to the DVC cache and
-remote (here a folder next to the project; in industry, S3 or GCS).
-
-### Step 5: Create and version the dataset
-
-```bash
-uv run python -m scripts.generate_synthetic_data
-uv run dvc add data/raw
-git add data/raw.dvc data/.gitignore
-git commit -m "Dataset v1: 160 synthetic clips"
-uv run dvc push
-```
-
-**Why:** `dvc add` snapshots the exact bytes of the dataset (`data/raw.dvc` holds its md5).
-Any later model can be traced back to this dataset version, and `dvc checkout` restores it.
-That's **data lineage**.
-
-> **Using real audio instead:** put 16 kHz mono WAVs in `data/raw/calm/` and
-> `data/raw/stressed/` (use `scripts/convert_audio.py` to convert), then run `dvc add` again.
-
-### Step 6: Start the MLflow tracking server (first container)
-
-Make sure Docker Desktop is running, then:
-
-```bash
-docker compose up -d --build mlflow-server
-docker compose ps
-```
-
-Wait until `mlflow-server` shows **(healthy)**, then open <http://localhost:5000>.
-
-**Why:** experiment tracking is a **shared service**, not a local folder. The container keeps
-its SQLite backend and model artifacts in the **named volume** `mlflow-data`, so they survive
-`docker compose down` and container rebuilds. Its port is bound to `127.0.0.1` only.
-
-### Step 7: Run the reproducible pipeline
-
-```bash
-uv run dvc dag
-uv run dvc repro
-```
-
-`dvc repro` runs the five stages in `dvc.yaml`:
-
-| Stage | What happens | MLOps principle |
+| | Voice model | Content model |
 |---|---|---|
-| `prepare` | SHA-256 per clip, stratified split. Duplicates are grouped *before* splitting. | Leakage prevention by construction |
-| `validate` | 16 kHz/mono/WAV format, hash integrity, **cross-split SHA-256 leakage**, class-ratio floor ≥ 30 %. A non-zero exit **stops the pipeline**. | Data contracts as gates |
-| `featurize` | 2 s / 0.5 s windows → Log-Mel + MFCC tensors | Same code online and offline, so no training/serving skew |
-| `train` | ResNet-18, about 1–2 min on CPU. Params, curves, git commit and DVC data hash go to MLflow. The model is registered with alias **@challenger**. | Experiment tracking, lineage |
-| `quality_gate` | Challenger vs champion on the **same** test split: accuracy ≥ champion + 0.015, stressed recall ≥ 0.92, p95 latency ≤ 150 ms, and behavioural tests (functionality, invariance, slice floors). The first model is promoted automatically (bootstrap); later ones wait for human approval. | Automated, rule-based promotion |
+| Data | **CREMA-D** (Cao et al. 2014; ODbL licence): 91 actors, neutral (1,087) vs fear (1,271) clips | 1,920 authored caller transcripts in 32 scenario families, 3 classes |
+| Split | **by speaker**: 64 train / 9 val / 18 test actors | **by scenario family**: test families are unseen phrasings |
+| Test accuracy | ≈ 86% on unseen speakers | ≈ 96% on unseen families |
+| Simple baseline | linear model on the average spectrum ≈ 68% | keyword rule ("pizza/order ⇒ threat") ≈ 85%, but only **49% covert recall** |
+| Shuffled-label control | ≈ 52% (chance) | ≈ 32% (chance = 33%) |
 
-Then inspect the results:
+`uv run python -m scripts.sanity_report` reproduces this table (`reports/sanity_report.json`).
+The content data contains deliberate **traps**: "my son is choking on *pizza*"
+(genuine emergency) and "sorry, wrong number, I wanted the *pizza* place" (no threat),
+so a keyword rule fails the behavioural tests.
 
-```bash
-uv run dvc metrics show reports/quality_gate.json
-git add dvc.lock reports
-git commit -m "Pipeline run: champion v1"
-uv run dvc push
-```
+**Lesson learned (worth a slide).** The first prototype used synthetic tones whose
+calm and stressed parameter ranges did not overlap, and scored about 99%. The
+shuffled-label control showed no leakage, but a plain linear model reached 91%: the task
+was too easy. Replacing the data with real speakers, and adding baselines and controls to
+every run, is what makes today's numbers meaningful.
 
-In the MLflow UI, open **Experiments → voice-stress-911** to see the curves, and **Models →
-voice-stress-detector** to see version 1 with aliases `@challenger` and `@champion`.
+## 4. Fresh setup (for a new machine or a reviewer)
 
-**Why:** `dvc.lock` records the hash of every input and output. Run `uv run dvc repro` again and
-everything is skipped ("Data and pipelines are up to date"). Change one value in `params.yaml`
-and **only the affected stages** re-run. That's reproducibility plus incremental computation.
-
-> If `train` fails with *Connection refused*, MLflow isn't up yet (Step 6). If you changed
-> `MLFLOW_HOST_PORT`, first set `MLFLOW_TRACKING_URI` to match. In PowerShell:
-> `$env:MLFLOW_TRACKING_URI="http://localhost:5001"`.
-
-### Step 8: Create the demo calls
+You need Docker Desktop, VS Code, Git and uv
+(`powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`).
 
 ```bash
+uv sync --all-extras                       # Python 3.11 env + CPU PyTorch + Whisper
+uv run pytest -m "not slow"                # ~110 fast tests, no GPU, no model weights
+git init && uv run dvc init
+uv run dvc remote add -d localstore ../911-dvc-storage
+uv run python -m scripts.download_cremad   # ~2,350 real clips, ~185 MB, 5-15 min
+uv run dvc add data/raw
+docker compose up -d --build mlflow-server
+uv run dvc repro                           # both models, bundle v1, gate (~15 min on CPU)
+uv run python -m scripts.sanity_report
 uv run python -m scripts.make_demo_calls
-```
-
-This produces `data/demo/` with four calls:
-
-- **call_01**: calm. Expect green.
-- **call_02**: calm, then duress, then calm. Expect a **red alert**.
-- **call_03**: a short burst. Expect amber windows but **no alert**, because of the consecutive rule.
-- **call_04**: 44.1 kHz stereo. Expect **HTTP 422**, a contract violation.
-
-### Step 9: Start the whole stack
-
-```bash
-docker compose up -d --build
-docker compose ps
-```
-
-The first build takes about 5–10 min while it downloads PyTorch CPU. Later builds reuse cached
-layers. Watch the readiness probe while the model loads:
-
-```bash
-# Windows PowerShell: use curl.exe (plain "curl" is an alias for Invoke-WebRequest)
-curl.exe -i http://localhost:8000/health      # HTTP 503 {"status":"loading"} … then HTTP 200
-docker compose logs -f stress-api              # Ctrl+C to stop following
-```
-
-**Why:**
-
-- **Container isolation.** Three images, each with only its own dependencies. The UI image has
-  no PyTorch, so a UI change never rebuilds the ML layer.
-- **Service discovery.** On `911-net`, containers reach each other by name
-  (`http://stress-api:8000`, `http://mlflow-server:5000`), not by IP.
-- **Readiness probes.** `/health` returns **503** while weights load (plus a JIT warm-up), then
-  **200**. Docker's healthcheck gives a **30 s startup budget** (`start_period`). `dispatcher-ui`
-  has `depends_on: condition: service_healthy`, so it **never starts against a half-loaded
-  model**, and `/predict` itself refuses traffic with 503 and `Retry-After` until ready.
-- **Volume mounting.** `./models` is mounted **read-only**, giving an offline fallback
-  checkpoint. `./params.yaml` is read-only, so you can tune θ without a rebuild. The SQLite audit
-  log lives in the named volume `telemetry-data`, so it survives restarts.
-
-### Step 10: Smoke-test the deployment
-
-```bash
+docker compose up -d --build               # first build downloads Whisper into the image
 uv run python -m scripts.smoke_test
 ```
 
-It prints the 503 → 200 transition and then the verdict for each demo call.
+Open the console at http://localhost:8501, MLflow at http://localhost:5000 and the API
+docs at http://localhost:8000/docs. The first bundle is promoted automatically
+(bootstrap); every later one waits for human approval.
 
-**Why:** a **post-deployment smoke test** checks the *running system* (network, volumes, model
-load), which unit tests can't.
+## 5. Release engineering (Course 4) and CI/CD (Course 7)
 
-### Step 11: Use the dispatcher console
-
-Open <http://localhost:8501>.
-
-1. The sidebar shows **API READY** with the model version, for example `voice-stress-detector@champion v1`.
-2. Pick **call_02_under_duress.wav** and click **Analyze call**. With *Simulate live stream* on,
-   the windows appear one hop at a time, and the **red PRIORITY ALERT** banner appears once three
-   consecutive windows exceed θ = 0.82. Alert windows are red in the chart and the table.
-3. Try **call_03** (amber, no alert) and **call_04** (data-contract rejection).
-4. The **Audit log** tab shows every call read back from SQLite, with alert calls in red.
-
-The interactive API docs are at <http://localhost:8000/docs>.
-
-### Step 12: Champion vs challenger, human approval and rollback
-
-The full Course 4 / Course 7 scenario (data shift → retraining → shadow → canary → A/B →
-bandit → approval → rollback) is in **section 3b** below. The core idea in three commands:
+**Scenario.** New calls arrive over noisy mobile phone lines (a distribution shift).
+The gate's slice tests already warned that the clean-trained voice model fails on
+phone-line audio. Continuous training creates bundle v2 from phone-augmented data. It
+passes the offline gate, but is **not** promoted automatically: it must earn trust on
+live traffic first.
 
 ```bash
-uv run dvc repro                                  # new version -> @challenger, gate decides
-uv run python -m src.quality_gate --promote-challenger   # a human approves
-uv run python -m src.quality_gate --rollback             # undo in one command
-```
+uv run python -m scripts.augment_phone        # new data: phone-line versions of every clip
+uv run dvc add data/raw && uv run dvc repro   # v2 -> @challenger, "awaiting_approval"
 
-With `auto_promote: false`, a passing challenger is tagged `awaiting_approval` in MLflow and is
-**not** promoted on its own. The only exception is the very first model, when there is no
-champion to protect (bootstrap). The API checks the aliases every 15 s and hot-swaps models
-without dropping traffic. You can also click **⬆️ Hot-reload models** in the console.
-
-**Why:** models are promoted by **moving an alias** in the registry, never by copying files by
-hand. Every version keeps its run, parameters, data hash and gate report. Rollback means
-pointing `@champion` back at the previous version.
-
-### Step 13: Demonstrate the readiness probe on stage
-
-```bash
-# in .env (copy .env.example first): MODEL_LOAD_DELAY_SECONDS=15
-docker compose up -d stress-api
-curl.exe -i http://localhost:8000/health     # 503 for ~15 s, then 200
-```
-
-### Step 14: CI on GitHub
-
-Create an empty GitHub repository, then:
-
-```bash
-git remote add origin https://github.com/<you>/911-stress-detection.git
-git branch -M main
-git push -u origin main
-```
-
-Open the **Actions** tab. The pipeline runs these jobs:
-
-1. **lint**: ruff
-2. **data-contracts**: generates a fresh small dataset and validates it
-3. **test**: pytest with FakeModel
-4. **model-smoke**: the whole pipeline with a 1-epoch model
-5. **docker**: builds all three images, boots the stack with `MODEL_SOURCE=fake`, and probes
-   `/health` across `911-net`
-
-**Why:** **continuous integration.** Every push is linted, contract-checked and tested before
-an image is built, and only tested code becomes a container. Large data never goes to GitHub:
-DVC keeps it in the local remote, and CI generates its own small synthetic set.
-
-### Step 15: Shut down
-
-```bash
-docker compose down        # stop containers, keep volumes (MLflow runs, audit log)
-docker compose down -v     # also delete volumes (clean slate)
-```
-
-### Optional: demo the UI before training anything
-
-```bash
-# PowerShell
-$env:MODEL_SOURCE="fake"; $env:FAKE_SCORES="0.1,0.2,0.9,0.95,0.97,0.93,0.2"; docker compose up -d --build
-# macOS / Linux
-MODEL_SOURCE=fake FAKE_SCORES="0.1,0.2,0.9,0.95,0.97,0.93,0.2" docker compose up -d --build
-```
-
-The scores are canned test-double values, not predictions. Afterwards, in PowerShell run
-`Remove-Item Env:MODEL_SOURCE, Env:FAKE_SCORES`, or open a new terminal, before starting the
-real stack.
-
----
-
-## 3b. Release engineering (Course 4) and CI/CD (Course 7)
-
-**The scenario.** The production model (v1) was trained on clean recordings. New calls start
-arriving over noisy, narrow-band mobile lines (a *distribution shift*). The behavioural slice
-tests show that v1 now fails on one slice (female voices on phone lines). Continuous training
-produces v2 on the new data. The offline gate passes v2, but it is **not** promoted
-automatically: it must first earn trust on live traffic.
-
-```bash
-# continuous training (new data -> new challenger)
-uv run python -m scripts.generate_synthetic_data --channel phone
-uv run dvc add data/raw
-uv run dvc repro                 # v2 registered as @challenger, gate PASS, "awaiting_approval"
-
-# the API picks up @challenger within 15 s; open the console's Release tab
-uv run python -m scripts.simulate_traffic --calls 200                     # shadow
-uv run python -m scripts.simulate_traffic --calls 600 --until-decision    # canary
-uv run python -m scripts.make_broken_challenger                           # rollback demo
+uv run python -m scripts.simulate_traffic --channel phone --calls 200            # shadow
+uv run python -m scripts.simulate_traffic --channel phone --calls 600 --until-decision  # canary
+uv run python -m scripts.make_broken_challenger          # sabotaged model -> auto rollback
 uv run python -m scripts.make_broken_challenger --restore
-uv run python -m scripts.simulate_traffic --calls 1000 --until-decision   # A/B test
-uv run python -m scripts.simulate_traffic --calls 300                     # bandit
+uv run python -m scripts.simulate_traffic --channel phone --calls 1000 --until-decision # A/B
+uv run python -m scripts.simulate_traffic --channel phone --calls 300            # bandit
 
-# continuous delivery: a human approves, rollback is one command
-uv run python -m src.quality_gate --promote-challenger
-uv run python -m src.quality_gate --rollback
+uv run python -m src.quality_gate --promote-challenger   # human approval
+uv run python -m src.quality_gate --rollback             # one-command rollback
 ```
+
+The experiment mode is chosen in the console's **Release** tab.
 
 | Course concept | Where it lives |
 |---|---|
-| Shadow deployment | `rollout.mode: shadow`. The challenger scores every call in a background task; dispatchers never see it |
-| Canary: steps, sticky routing, guardrails, automatic rollback | `src/rollout.py::canary_decision`, evaluated after every call |
+| Shadow deployment | the challenger scores every call in the background; nobody sees it |
+| Canary: sticky routing, steps 10→25→50→100%, guardrails, automatic rollback | `src/rollout.py::canary_decision` |
 | One-sided pooled z-test, p95 latency ratio, PSI / KS, class collapse | `src/rollout.py` |
-| A/B test: pre-computed sample size, no peeking, unpooled CI, SRM | `src/rollout.py::ab_report` |
-| Bandits: ε-greedy, UCB1, Thompson, traffic floor, logged propensities, regret | `src/bandits.py` |
+| A/B test: sample size fixed in advance, no peeking, unpooled CI, SRM check | `src/rollout.py::ab_report` |
+| Bandits: ε-greedy, UCB1, Thompson, 5% floor, logged propensities, regret | `src/bandits.py` |
 | Delayed reward | `POST /feedback` (console buttons or the simulator) |
-| Fallback pattern | a failing challenger falls back to the champion and is counted as an error |
-| Behavioural model tests and gate report with standard error | `src/behavioural.py`, `src/quality_gate.py` |
-| Continuous delivery with human approval | `auto_promote: false`, `--promote-challenger`, `release` job in the `production` environment |
-| Build once, tag with the commit SHA | `images` job: build → boot → probe → push the same images to GHCR |
-| Two release trains | code = image tag; model = MLflow alias, followed live by the API (`MODEL_POLL_SECONDS`) |
-| Rollback in one command | `--rollback` moves `@champion` back to the previous version |
+| Behavioural tests, standard error in the gate report | `src/behavioural.py`, `src/quality_gate.py` |
+| Continuous delivery + human approval | `auto_promote: false`, `--promote-challenger`, `release` job (GitHub environment `production`) |
+| Build once, tag with the commit SHA | CI `images` job pushes the tested images to GHCR |
+| Two release trains | code + Whisper = image tag; voice + content models = MLflow alias |
 
-> In a 911 setting, A/B tests and bandits deliberately send some real calls to the worse
-> model. They are demonstrated here **on simulated traffic only**. The real release path is
+> In a 911 setting, A/B tests and bandits deliberately send some real calls to the weaker
+> model. They are demonstrated on **simulated traffic only**. The real release path is
 > shadow → canary → human approval.
 
-## 4. Troubleshooting
+## 6. Repository layout
+
+```
+├── .github/workflows/ci.yml        lint → data contracts (real CREMA-D slice) → tests → smoke → images → approval
+├── Dockerfile / docker-compose.yml api (bundle + Whisper baked in) · ui · mlflow, on 911-net
+├── dvc.yaml / params.yaml          pipeline + every tunable number (fusion, gate, canary, A/B, bandit)
+├── docs/demo_call_scripts.md       7 scripts to record yourself for a realistic demo
+├── scripts/
+│   ├── download_cremad.py          real voices (neutral vs fear) + speaker demographics
+│   ├── augment_phone.py            phone-line copies (data-shift scenario)
+│   ├── sanity_report.py            shuffled-label controls + simple baselines
+│   ├── make_demo_calls.py          demo calls from held-out real speakers
+│   ├── simulate_traffic.py         held-out transcripts + held-out voices + feedback
+│   ├── make_broken_challenger.py   canary rollback demo
+│   ├── convert_audio.py            phone recordings (m4a/mp3) → 16 kHz mono WAV
+│   ├── smoke_test.py               post-deploy check
+│   └── generate_synthetic_data.py  CI test fixtures only (not training data)
+├── src/  asr · augment · bandits · behavioural · bundle · config · data_contracts · features
+│         fake_model · fusion · mlflow_model · model · package · preprocessing · quality_gate
+│         registry · rollout · serve · telemetry · text_contracts · text_model · train
+│         transcripts · ui
+└── tests/  preprocessing · data_contracts · content · bundle · alerting · model · api
+            api_rollout · rollout · bandits · behavioural · pipeline_smoke (slow)
+```
+
+## 7. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `uv` / `git` not recognized | Reopen VS Code (PATH refresh). On Windows, also try a new PowerShell window. |
-| `Cannot connect to the Docker daemon` | Start Docker Desktop and wait for *Engine running*. |
-| macOS: port 5000 already in use | Turn off *AirPlay Receiver* (System Settings → General → AirDrop & Handoff), or set `MLFLOW_HOST_PORT=5001` in `.env` and export `MLFLOW_TRACKING_URI=http://localhost:5001`. |
-| `stress-api` stays *unhealthy*, `/health` shows `"status":"failed"` | No champion exists yet. Run Steps 6–7 first, or use `MODEL_SOURCE=fake`. Then `docker compose up -d stress-api`. |
-| `dispatcher-ui` never starts | It waits for `stress-api` to be healthy, so fix that first. Check `docker compose logs stress-api`. |
-| Docker build runs out of memory (Windows) | Docker Desktop → Settings → Resources: give WSL 2 at least 4 GB. |
-| `dvc repro` says *data/raw does not exist* | Run Step 5. After a fresh clone, use `uv run dvc pull` instead. |
-| Your own recording returns 422 | `uv run python -m scripts.convert_audio in.m4a data/demo/mine.wav` (MP3/M4A need FFmpeg). |
-| Release tab says "no @challenger model loaded" | `@challenger` must point to a different version than `@champion`. Train one (`dvc repro` with new data), then wait 15 s or click *Hot-reload models*. |
-| CI `test` job fails at `uv sync --locked` | `uv.lock` is missing or stale. Run `uv lock`, then commit and push `uv.lock`. |
-| `release` job never asks for approval | GitHub → Settings → Environments → **production** → add yourself under *Required reviewers*. On a private repo, this needs a paid plan. |
-| Intel Mac: torch fails to install | PyTorch no longer ships Intel-Mac wheels. Run the stack in Docker (Step 9) and train on another machine. |
+| `stress-api` unhealthy, `/health` says "bundle not found" or "acoustic-only" | No bundle champion yet: run `uv run dvc repro`, then `docker compose up -d stress-api`. |
+| `/health` shows `"asr": "failed ..."` | The Whisper weights could not be loaded. Rebuild with internet access: `docker compose build --no-cache stress-api`. Typed transcripts still work. |
+| `download_cremad` stops with "could not download" | Network hiccup: run it again; already-downloaded files are skipped. |
+| CI `test` job fails at `uv sync --locked` | `uv.lock` is stale: run `uv sync --all-extras`, then commit `uv.lock`. |
+| Console Release tab: "no @challenger model loaded" | `@challenger` must differ from `@champion`: train one (`dvc repro` with new data), wait 15 s. |
+| `release` job never asks for approval | GitHub → Settings → Environments → **production** → *Required reviewers*. |
+| Your own recording: transcript is empty or wrong | Speak clearly in English, 20 cm from the phone; convert with `scripts.convert_audio`. |
+| macOS: port 5000 busy | Disable AirPlay Receiver, or set `MLFLOW_HOST_PORT=5001` in `.env` and export `MLFLOW_TRACKING_URI`. |
 
-## 5. Configuration reference
+## 8. Limitations (say these in the presentation)
 
-All numbers live in `params.yaml`. The serving container also reads these environment variables:
-`MODEL_SOURCE` (`auto|mlflow|file|fake`), `MODEL_LOAD_DELAY_SECONDS`, `FAKE_SCORES`,
-`DURESS_THRESHOLD`, `CONSECUTIVE_WINDOWS`, `MODEL_NAME`, `MODEL_ALIAS`, `TELEMETRY_DB`.
-
-## 6. Limitations (say these in the presentation)
-
-- The synthetic data encodes textbook stress correlates (raised F0, 8–12 Hz tremor, jitter,
-  faster syllables). Near-perfect test accuracy here is **not** evidence of real-world performance.
-- θ = 0.82 and K = 3 are configurable demo values, not calibrated clinical thresholds.
-- The 1.5-point margin is a project rule, not a significance test. Real promotion would also look
-  at calibration, subgroup performance, false-alarm cost and independent validation, with human
-  sign-off.
-- Docker Compose on one host gives isolation and health-gated startup, but not multi-node
-  failover or a zero-downtime guarantee.
+- **Content data is authored**, not real 911 calls. Real covert calls are rarer, messier
+  and more varied. The content model would need real, consented, labelled call data.
+- **Voice data is acted** (CREMA-D actors performing fear), which is a proxy for real
+  duress.
+- **The stress profile used to pair transcripts with voices** in the gate and simulator is
+  an assumption (`params.yaml → quality_gate.stress_profile`).
+- **The fusion rule is hand-designed and transparent** rather than learned, because no
+  dataset links call outcomes to both audio and transcript. With such data, it would
+  become a calibrated model.
+- **English only.** Whisper supports Arabic, but the content model would need Arabic scripts.
+- **Per-call analysis** with a replay view, not word-by-word live streaming.
+- Docker Compose on one laptop gives isolation and health-gated startup, but not
+  multi-node failover.

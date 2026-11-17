@@ -7,7 +7,7 @@ audio:
   channels: 1               # data contract: mono
   window_seconds: 2.0       # sliding analysis window
   hop_seconds: 0.5          # window step
-  min_duration_seconds: 2.0 # a call must contain at least one full window
+  min_duration_seconds: 1.0 # shorter clips are rejected; 1-2 s clips are zero-padded to one window
   max_duration_seconds: 600
 
 features:
@@ -22,13 +22,13 @@ data:
   raw_dir: data/raw
   features_dir: data/features
   manifest: data/manifests/manifest.csv
-  classes: [calm, stressed]   # index 1 == duress / high-threat
+  classes: [calm, stressed]   # VOICE classes (CREMA-D neutral vs fear); index 1 = stressed voice
   test_fraction: 0.2
   val_fraction: 0.1
   min_class_ratio: 0.30       # distribution floor: each class >= 30% of clips
   seed: 42
 
-synthetic:                    # demo dataset generator (scripts/generate_synthetic_data.py)
+synthetic:                    # CI test fixtures ONLY (scripts/generate_synthetic_data.py) - not training data
   clips_per_class: 80
   min_clip_seconds: 3.0
   max_clip_seconds: 6.0
@@ -44,28 +44,39 @@ train:
 
 mlflow:
   tracking_uri: http://localhost:5000   # overridden by $MLFLOW_TRACKING_URI
-  experiment_name: voice-stress-911
-  registered_model_name: voice-stress-detector
+  experiment_name: covert-call-911
+  registered_model_name: covert-call-detector
 
 quality_gate:
-  min_accuracy_margin: 0.015   # delta: challenger must beat champion by 1.5 pts
-  min_stressed_recall: 0.92    # zero-tolerance floor for missed danger calls
-  max_p95_latency_ms: 150      # single-window CPU inference budget
+  min_accuracy_margin: 0.015   # delta on threat-decision accuracy vs the champion
+  min_covert_recall: 0.90      # missed covert (under-threat) calls are the worst failure
+  max_genuine_false_alarm: 0.05  # a stressed caller with a REAL emergency must not alert
+  min_voice_accuracy: 0.65     # voice model must clearly beat chance on unseen speakers
+  max_p95_latency_ms: 150      # single-window CPU voice inference budget
   latency_trials: 100
   # Course 7 (slide 6): a new model version is *continuous delivery* - the gate
   # filters automatically, a human approves the promotion.
   auto_promote: false
-  # Course 7 (slide 12): behavioural model tests on freshly synthesised clips
+  # Assumption used to build simulated test calls (transcript + real recording):
+  # probability that the caller's voice is a "fear" recording, per scenario.
+  stress_profile:
+    genuine_emergency: 0.80
+    covert: 0.60
+    non_emergency: 0.10
+  # Course 7 (slide 12): behavioural tests
   behavioural:
-    clips_per_slice: 12          # per (speaker sex x channel x class)
-    min_functionality_accuracy: 0.90
-    invariance_min_agreement: 0.95   # same decision after gain / light-noise changes
-    slice_min_recall_stressed: 0.85  # per slice floor (sex x channel)
-    slice_min_accuracy: 0.80
+    min_functionality_accuracy: 0.90   # canonical calls incl. the pizza traps
+    invariance_min_agreement: 0.90     # swap address/name/food + ASR noise -> same class
+    directional_max_genuine_alert: 0.02  # genuine emergency, max stress -> (almost) never alert
+    directional_min_covert_alert: 0.85   # covert content, calm voice -> still alerts
+    clips_per_slice: 40                # held-out clips per (sex x channel) voice slice
+    slice_min_accuracy: 0.60
+    slice_min_recall_stressed: 0.55
 
-serving:
-  duress_threshold: 0.82       # theta
-  consecutive_windows: 3       # windows above theta in a row before alerting
+serving:                       # voice-stress TIMELINE shown to the dispatcher (information only;
+                               # the alert itself is the fusion decision above)
+  duress_threshold: 0.82       # theta: a window counts as "stressed" above this
+  consecutive_windows: 3       # >= K stressed windows in a row = "sustained stress" run
 
 rollout:                       # Course 4: online evaluation of @challenger vs @champion
   mode: champion_only          # champion_only | shadow | canary | ab | bandit
@@ -87,3 +98,27 @@ rollout:                       # Course 4: online evaluation of @challenger vs @
     policy: thompson           # thompson | ucb1 | epsilon_greedy
     epsilon: 0.10
     floor: 0.05                # every arm keeps >= 5% of traffic
+
+text:                          # content branch: what the caller SAYS
+  transcripts: data/text/transcripts.csv
+  per_family: 60               # transcripts generated per scenario family
+  seed: 911
+  min_class_ratio: 0.20        # each class >= 20% of the transcripts
+  model:
+    ngram_max: 2
+    min_df: 2
+    C: 2.0
+
+fusion:                        # how content and voice are combined (transparent rule)
+  # threat = p_covert * (base + stress_weight * stress)
+  #        + incongruence_weight * p_non_emergency * stress
+  # stress = mean P(stressed) over the call's 2 s windows (acoustic model).
+  # A stressed caller reporting a genuine emergency adds NOTHING: stress is expected.
+  # Calibrated on the VALIDATION families (never the test set): with 0.70/0.30 only 82%
+  # of calm-voiced covert calls alerted; a covert caller often sounds calm on purpose,
+  # so content carries most of the weight and voice stress adds suspicion on top.
+  covert_base: 0.85
+  covert_stress_weight: 0.25
+  incongruence_weight: 0.40    # a terrified voice asking a "harmless" question
+  alert_threshold: 0.50        # >= -> red PRIORITY alert (possible covert call)
+  review_threshold: 0.30       # >= -> amber "review" flag

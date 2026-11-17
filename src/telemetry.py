@@ -56,6 +56,16 @@ CALL_COLUMNS: dict[str, str] = {
     "shadow_max_score": "REAL",
     "shadow_ms_per_window": "REAL",
     "shadow_error": "INTEGER",
+    # --- content + fusion (what was said, and the combined decision) ---
+    "transcript": "TEXT",
+    "transcript_source": "TEXT",
+    "content_label": "TEXT",
+    "p_covert": "REAL",
+    "stress_score": "REAL",
+    "threat_score": "REAL",
+    "threat_level": "TEXT",
+    "reason": "TEXT",
+    "asr_ms": "REAL",
     # --- delayed ground truth from the dispatcher ---
     "true_label": "TEXT",
     "correct": "INTEGER",
@@ -135,7 +145,7 @@ class TelemetryStore:
                         **w,
                         "call_id": call["call_id"],
                         "above_threshold": int(w["above_threshold"]),
-                        "in_alert": int(w["in_alert"]),
+                        "in_alert": int(w.get("in_alert", w.get("sustained", False))),
                     }
                     for w in windows
                 ],

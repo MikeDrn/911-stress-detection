@@ -1,14 +1,16 @@
 # Reproducible ML pipeline. `uv run dvc repro` re-runs only the stages whose
 # code, data or params changed; `uv run dvc dag` draws the graph.
 #
-#   data/raw (dvc add) -> prepare -> validate -> featurize -> train -> quality_gate
+#   VOICE:   data/raw (dvc add) -> prepare -> validate -> featurize -> train_acoustic --.
+#                                                                                      +-> package -> quality_gate
+#   CONTENT: make_transcripts -> validate_text -> train_text ---------------------------'
 #
-# The train and quality_gate stages talk to MLflow at $MLFLOW_TRACKING_URI
-# (default http://localhost:5000 = the mlflow-server container).
+# `package` logs ONE MLflow run and registers the bundle (voice + content + fusion)
+# as @challenger; `quality_gate` decides whether it may replace @champion.
 
 stages:
   prepare:
-    desc: Hash every clip (SHA-256) and write a leakage-safe stratified split manifest
+    desc: Hash every clip (SHA-256) and split BY SPEAKER (no actor in two splits)
     cmd: python -m src.data_contracts prepare
     deps:
       - data/raw
@@ -23,7 +25,7 @@ stages:
       - data/manifests/manifest.csv
 
   validate:
-    desc: Enforce data contracts (16 kHz mono WAV, SHA-256 integrity + leakage, class floors)
+    desc: Audio contracts - 16 kHz mono WAV, SHA-256 integrity + leakage, speaker leakage, class floors
     cmd: python -m src.data_contracts validate
     deps:
       - data/raw
@@ -50,37 +52,95 @@ stages:
     outs:
       - data/features
 
-  train:
-    desc: Train ResNet-18, log to MLflow, register version as @challenger
+  train_acoustic:
+    desc: Train the ResNet-18 voice-stress model (how it is said)
     cmd: python -m src.train
     deps:
       - data/features
       - src/train.py
       - src/model.py
-      - src/mlflow_model.py
     params:
       - train
-      - mlflow
     outs:
-      - models/challenger.pt
-      - reports/train_run.json:
+      - models/acoustic.pt
+      - reports/acoustic_history.json:
           cache: false
     metrics:
-      - reports/train_metrics.json:
+      - reports/acoustic_metrics.json:
+          cache: false
+
+  make_transcripts:
+    desc: Write the scripted 911 transcript dataset (held-out scenario families)
+    cmd: python -m src.transcripts
+    deps:
+      - src/transcripts.py
+    params:
+      - text.per_family
+      - text.seed
+    outs:
+      - data/text/transcripts.csv
+
+  validate_text:
+    desc: Text contracts - schema, family leakage, duplicate leakage, class coverage
+    cmd: python -m src.text_contracts
+    deps:
+      - data/text/transcripts.csv
+      - src/text_contracts.py
+    params:
+      - text.min_class_ratio
+    metrics:
+      - reports/text_contract.json:
+          cache: false
+
+  train_text:
+    desc: Train the explainable transcript classifier (what is said) + sanity checks
+    cmd: python -m src.text_model
+    deps:
+      - data/text/transcripts.csv
+      - reports/text_contract.json
+      - src/text_model.py
+    params:
+      - text.model
+    outs:
+      - models/text_model.json
+    metrics:
+      - reports/text_metrics.json:
+          cache: false
+
+  package:
+    desc: Bundle voice + content models + fusion rule, log one MLflow run, register @challenger
+    cmd: python -m src.package
+    deps:
+      - models/acoustic.pt
+      - models/text_model.json
+      - reports/acoustic_metrics.json
+      - reports/text_metrics.json
+      - src/package.py
+      - src/bundle.py
+      - src/fusion.py
+      - src/mlflow_model.py
+    params:
+      - fusion
+      - mlflow
+    outs:
+      - models/challenger_bundle
+      - reports/train_run.json:
           cache: false
 
   quality_gate:
-    desc: Champion vs challenger on the same test split; promote to @champion if all rules pass
+    desc: Champion vs challenger bundles on simulated held-out calls; behavioural tests; promotion
     cmd: python -m src.quality_gate
     deps:
-      - models/challenger.pt
+      - models/challenger_bundle
       - reports/train_run.json
       - data/features
+      - data/text/transcripts.csv
       - src/quality_gate.py
       - src/behavioural.py
-      - src/synthetic.py
+      - src/augment.py
     params:
       - quality_gate
+      - fusion
     metrics:
       - reports/quality_gate.json:
           cache: false

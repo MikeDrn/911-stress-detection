@@ -39,7 +39,11 @@ def get(url: str) -> tuple[int, dict]:
 
 
 def post_wav_bytes(
-    url: str, data: bytes, filename: str, call_id: str | None = None
+    url: str,
+    data: bytes,
+    filename: str,
+    call_id: str | None = None,
+    transcript: str | None = None,
 ) -> tuple[int, dict]:
     boundary = uuid.uuid4().hex
     parts = [
@@ -50,11 +54,12 @@ def post_wav_bytes(
         + data
         + b"\r\n"
     ]
-    if call_id:
+    for field, value in (("call_id", call_id), ("transcript", transcript)):
+        if not value:
+            continue
         parts.append(
             (
-                f'--{boundary}\r\nContent-Disposition: form-data; name="call_id"\r\n\r\n'
-                f"{call_id}\r\n"
+                f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"\r\n\r\n{value}\r\n'
             ).encode()
         )
     body = b"".join(parts) + f"--{boundary}--\r\n".encode()
@@ -102,10 +107,11 @@ def main(argv: list[str] | None = None) -> int:
     for p in demo:
         code, body = post_wav(f"{args.url}/predict", p)
         if code == 200:
-            verdict = "ALERT" if body["alert"] else "no alert"
+            verdict = body.get("threat_level", "?").upper()
             print(
-                f"[smoke] {p.name:42s} HTTP 200  max={body['max_score']:.3f}  "
-                f"windows={body['n_windows']:3d}  {verdict}  ({body['latency_ms']:.0f} ms)"
+                f"[smoke] {p.name:42s} HTTP 200  {verdict:6s} threat={body['threat_score']:.2f} "
+                f"stress={body['stress_score']:.2f}  ({body['latency_ms']:.0f} ms)\n"
+                f"        transcript: {body.get('transcript')!r}"
             )
         else:
             print(f"[smoke] {p.name:42s} HTTP {code}  {body.get('detail')}")

@@ -1,0 +1,39 @@
+{
+  "voice": {
+    "real_model_test_accuracy": 0.8654353562005277,
+    "linear_baseline_average_spectrum": 0.6767810026385225,
+    "shuffled_label_control": 0.5356200527704486,
+    "chance": 0.5382585751978892,
+    "test_speakers": [
+      "cremad1003",
+      "cremad1005",
+      "cremad1019",
+      "cremad1026",
+      "cremad1027",
+      "cremad1034",
+      "cremad1052",
+      "cremad1057",
+      "cremad1058",
+      "cremad1060",
+      "cremad1063",
+      "cremad1069",
+      "cremad1070",
+      "cremad1073",
+      "cremad1081",
+      "cremad1086",
+      "cremad1089",
+      "cremad1091"
+    ],
+    "speaker_leakage": {}
+  },
+  "content": {
+    "real_model_test_accuracy_unseen_families": 0.9571428571428572,
+    "keyword_rule": {
+      "accuracy": 0.8452380952380952,
+      "covert_recall": 0.49166666666666664,
+      "false_alarms": 4
+    },
+    "shuffled_label_control": 0.32142857142857145,
+    "chance": 0.3333333333333333
+  }
+}

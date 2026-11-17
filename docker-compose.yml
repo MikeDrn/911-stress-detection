@@ -46,18 +46,19 @@ services:
     environment:
       MODEL_SOURCE: ${MODEL_SOURCE:-auto}            # auto = MLflow @champion, else models/champion.pt
       MLFLOW_TRACKING_URI: http://mlflow-server:5000  # service-name DNS on 911-net
-      MODEL_NAME: voice-stress-detector
       MODEL_ALIAS: champion
-      MODEL_PATH: /app/models/champion.pt
+      MODEL_PATH: /app/models/champion_bundle
+      MODEL_NAME: covert-call-detector
       TELEMETRY_DB: /app/telemetry/telemetry.db
       MODEL_LOAD_DELAY_SECONDS: ${MODEL_LOAD_DELAY_SECONDS:-5}   # makes the 503 phase visible
       FAKE_SCORES: ${FAKE_SCORES:-}
       FAKE_CHALLENGER_SCORES: ${FAKE_CHALLENGER_SCORES:-}
+      ASR_MODEL: ${ASR_MODEL:-base.en}               # baked into the image; "none" disables
       MODEL_POLL_SECONDS: ${MODEL_POLL_SECONDS:-15}  # follow @champion/@challenger moves live
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
-      - ./models:/app/models:ro                  # offline fallback checkpoint, read-only
+      - ./models:/app/models:ro                  # offline fallback bundle, read-only
       - ./params.yaml:/app/params.yaml:ro        # tune theta / K without rebuilding
       - telemetry-data:/app/telemetry            # SQLite audit log survives restarts
     depends_on:
@@ -70,11 +71,11 @@ services:
       interval: 5s
       timeout: 3s
       retries: 3
-      start_period: 30s
+      start_period: 60s   # startup budget: bundle + Whisper load + warm-up
       start_interval: 2s
     deploy:
       resources:
-        limits: { cpus: "2.0", memory: 3g }
+        limits: { cpus: "2.0", memory: 4g }
 
   dispatcher-ui:
     <<: *common

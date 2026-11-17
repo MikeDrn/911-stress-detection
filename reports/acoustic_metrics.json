@@ -1,0 +1,8 @@
+{
+  "best_epoch": 6,
+  "best_val_accuracy": 0.9060913920402527,
+  "best_val_loss": 0.2876754696599118,
+  "best_val_recall_stressed": 0.9262672662734985,
+  "train_seconds": 520.21,
+  "n_parameters": 11171266
+}

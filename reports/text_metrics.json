@@ -1,0 +1,55 @@
+{
+  "train": {
+    "accuracy": 1.0,
+    "recall": {
+      "covert": 1.0,
+      "genuine_emergency": 1.0,
+      "non_emergency": 1.0
+    },
+    "confusion": {
+      "covert->covert": 360,
+      "genuine_emergency->genuine_emergency": 600,
+      "non_emergency->non_emergency": 360
+    },
+    "n": 1320
+  },
+  "val": {
+    "accuracy": 0.7,
+    "recall": {
+      "covert": 1.0,
+      "genuine_emergency": 1.0,
+      "non_emergency": 0.1
+    },
+    "confusion": {
+      "covert->covert": 60,
+      "genuine_emergency->genuine_emergency": 60,
+      "non_emergency->genuine_emergency": 54,
+      "non_emergency->non_emergency": 6
+    },
+    "n": 180
+  },
+  "test_heldout_families": {
+    "accuracy": 0.9571428571428572,
+    "recall": {
+      "covert": 0.9833333333333333,
+      "genuine_emergency": 1.0,
+      "non_emergency": 0.8666666666666667
+    },
+    "confusion": {
+      "covert->covert": 118,
+      "covert->genuine_emergency": 2,
+      "genuine_emergency->genuine_emergency": 180,
+      "non_emergency->covert": 2,
+      "non_emergency->genuine_emergency": 14,
+      "non_emergency->non_emergency": 104
+    },
+    "n": 420
+  },
+  "keyword_baseline_test": {
+    "accuracy": 0.8452380952380952,
+    "covert_recall": 0.49166666666666664,
+    "false_alarms": 4
+  },
+  "shuffled_label_control_test_accuracy": 0.32142857142857145,
+  "vocabulary_size": 2335
+}
