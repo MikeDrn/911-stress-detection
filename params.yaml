@@ -1,0 +1,59 @@
+# Single source of truth for every tunable number in the system.
+# DVC tracks this file: changing a value here invalidates exactly the
+# pipeline stages that depend on it (see `params:` in dvc.yaml).
+
+audio:
+  sample_rate: 16000        # data contract: 16 kHz
+  channels: 1               # data contract: mono
+  window_seconds: 2.0       # sliding analysis window
+  hop_seconds: 0.5          # window step
+  min_duration_seconds: 2.0 # a call must contain at least one full window
+  max_duration_seconds: 600
+
+features:
+  n_mels: 64
+  n_fft: 400                # 25 ms analysis frame
+  hop_length: 160           # 10 ms frame step -> 201 frames per 2 s window
+  n_mfcc: 20
+  fmin: 50
+  fmax: 8000
+
+data:
+  raw_dir: data/raw
+  features_dir: data/features
+  manifest: data/manifests/manifest.csv
+  classes: [calm, stressed]   # index 1 == duress / high-threat
+  test_fraction: 0.2
+  val_fraction: 0.1
+  min_class_ratio: 0.30       # distribution floor: each class >= 30% of clips
+  seed: 42
+
+synthetic:                    # demo dataset generator (scripts/generate_synthetic_data.py)
+  clips_per_class: 80
+  min_clip_seconds: 3.0
+  max_clip_seconds: 6.0
+  seed: 911
+
+train:
+  architecture: resnet18_2d  # resnet18_2d (Log-Mel) | resnet18_1d (MFCC)
+  epochs: 6
+  batch_size: 32
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  seed: 7
+
+mlflow:
+  tracking_uri: http://localhost:5000   # overridden by $MLFLOW_TRACKING_URI
+  experiment_name: voice-stress-911
+  registered_model_name: voice-stress-detector
+
+quality_gate:
+  min_accuracy_margin: 0.015   # delta: challenger must beat champion by 1.5 pts
+  min_stressed_recall: 0.92    # zero-tolerance floor for missed danger calls
+  max_p95_latency_ms: 150      # single-window CPU inference budget
+  latency_trials: 100
+  auto_promote: true           # false => gate passes but a human must promote
+
+serving:
+  duress_threshold: 0.82       # theta
+  consecutive_windows: 3       # windows above theta in a row before alerting

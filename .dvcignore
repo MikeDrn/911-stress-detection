@@ -1,0 +1,4 @@
+# DVC ignores these when hashing directories
+__pycache__/
+*.pyc
+.DS_Store

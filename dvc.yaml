@@ -1,0 +1,84 @@
+# Reproducible ML pipeline. `uv run dvc repro` re-runs only the stages whose
+# code, data or params changed; `uv run dvc dag` draws the graph.
+#
+#   data/raw (dvc add) -> prepare -> validate -> featurize -> train -> quality_gate
+#
+# The train and quality_gate stages talk to MLflow at $MLFLOW_TRACKING_URI
+# (default http://localhost:5000 = the mlflow-server container).
+
+stages:
+  prepare:
+    desc: Hash every clip (SHA-256) and write a leakage-safe stratified split manifest
+    cmd: python -m src.data_contracts prepare
+    deps:
+      - data/raw
+      - src/data_contracts.py
+      - src/preprocessing.py
+    params:
+      - data.classes
+      - data.test_fraction
+      - data.val_fraction
+      - data.seed
+    outs:
+      - data/manifests/manifest.csv
+
+  validate:
+    desc: Enforce data contracts (16 kHz mono WAV, SHA-256 integrity + leakage, class floors)
+    cmd: python -m src.data_contracts validate
+    deps:
+      - data/raw
+      - data/manifests/manifest.csv
+      - src/data_contracts.py
+    params:
+      - audio
+      - data.min_class_ratio
+    metrics:
+      - reports/data_contract.json:
+          cache: false
+
+  featurize:
+    desc: 2 s / 0.5 s sliding windows -> Log-Mel + MFCC tensors per split
+    cmd: python -m src.features
+    deps:
+      - data/manifests/manifest.csv
+      - reports/data_contract.json
+      - src/features.py
+      - src/preprocessing.py
+    params:
+      - audio
+      - features
+    outs:
+      - data/features
+
+  train:
+    desc: Train ResNet-18, log to MLflow, register version as @challenger
+    cmd: python -m src.train
+    deps:
+      - data/features
+      - src/train.py
+      - src/model.py
+      - src/mlflow_model.py
+    params:
+      - train
+      - mlflow
+    outs:
+      - models/challenger.pt
+      - reports/train_run.json:
+          cache: false
+    metrics:
+      - reports/train_metrics.json:
+          cache: false
+
+  quality_gate:
+    desc: Champion vs challenger on the same test split; promote to @champion if all rules pass
+    cmd: python -m src.quality_gate
+    deps:
+      - models/challenger.pt
+      - reports/train_run.json
+      - data/features
+      - src/quality_gate.py
+    params:
+      - quality_gate
+    metrics:
+      - reports/quality_gate.json:
+          cache: false

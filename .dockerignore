@@ -1,0 +1,18 @@
+# Keep the build context small: data and models reach containers via volumes.
+.git
+.github
+.venv
+.dvc/cache
+.dvc/tmp
+**/__pycache__
+.pytest_cache
+.ruff_cache
+data
+models
+reports
+telemetry
+mlruns
+tests
+*.md
+!README.md
+.env

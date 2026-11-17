@@ -1,0 +1,25 @@
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Data and models are versioned by DVC, not Git (DVC adds its own entries too)
+/data/raw
+/data/features
+/data/manifests
+/data/demo
+/models/*.pt
+/telemetry/
+/mlruns/
+mlflow.db
+reports/junit.xml
+
+# Local environment overrides
+.env
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
